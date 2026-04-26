@@ -6,7 +6,7 @@ import time
 import hashlib
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.filters import Command
-from aiogram.utils.markdown import hcode, hbold, hlink
+from aiogram.utils.markdown import hcode, hbold
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 import asyncio
 
@@ -14,7 +14,7 @@ import asyncio
 API_TOKEN = os.getenv('BOT_TOKEN')
 FK_SHOP_ID = os.getenv('FK_SHOP_ID')
 FK_SECRET_1 = os.getenv('FK_SECRET_1')
-# ID админов (тебе и другу)
+# ID админов из переменных Railway
 ADMINS = [int(os.getenv('ADMIN_ID_1')), int(os.getenv('ADMIN_ID_2'))]
 
 PANEL_URL = os.getenv('PANEL_URL')
@@ -35,6 +35,7 @@ def get_vpn_link(user_id, username):
         session.post(f"{PANEL_URL}/login", data={'username': LOGIN, 'password': PASSWORD}, timeout=10)
         client_uuid = str(uuid.uuid4())
         client_email = f"{username or 'user'}_{user_id}"
+        
         limit_gb = 50 * 1024 * 1024 * 1024
         duration = 30 * 24 * 60 * 60 * 1000
         expiry_time = int((time.time() * 1000) + duration)
@@ -68,11 +69,23 @@ def main_menu():
         [InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/твой_логин")]
     ])
 
+def back_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
+
 # --- ОБРАБОТЧИКИ ---
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer(f"👋 Привет! Это <b>TrubaVPN</b>.", reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer(
+        f"👋 Привет, {hbold(message.from_user.full_name)}!\n\n"
+        f"Добро пожаловать в <b>TrubaVPN</b>. Выберите нужное действие ниже:",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "to_main")
+async def to_main(callback: CallbackQuery):
+    await callback.message.edit_text("Выбери нужное действие:", reply_markup=main_menu())
 
 @router.callback_query(F.data == "tariffs")
 async def show_tariffs(callback: CallbackQuery):
@@ -85,25 +98,31 @@ async def show_tariffs(callback: CallbackQuery):
         [InlineKeyboardButton(text="✅ Я оплатил!", callback_data=f"paid_{callback.from_user.id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
     ])
-    await callback.message.edit_text("<b>Тариф «Блатной»</b>\n\nОплатите по ссылке и нажмите кнопку ниже.", reply_markup=markup, parse_mode="HTML")
+    
+    await callback.message.edit_text(
+        "🚀 <b>Доступные тарифы:</b>\n\n"
+        "• <b>Тариф «Блатной»</b>\n"
+        "  — <b>Срок:</b> 30 дней\n"
+        "  — <b>Трафик:</b> 50 ГБ\n"
+        "  — <b>Скорость:</b> Без ограничений\n\n"
+        "Оплатите по ссылке ниже и нажмите кнопку подтверждения:",
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
 
-# Когда юзер нажал "Я оплатил"
 @router.callback_query(F.data.startswith("paid_"))
 async def user_confirm_payment(callback: CallbackQuery):
     user_id = callback.from_user.id
     username = callback.from_user.username or "Нет юзернейма"
     
-    # Уведомляем юзера
     await callback.message.answer("⏳ Запрос отправлен админам. Ожидайте подтверждения (обычно 2-5 мин).")
     await callback.answer()
 
-    # Кнопки для админов
     admin_markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить и выдать", callback_data=f"admin_approve_{user_id}_{username}")],
         [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"admin_decline_{user_id}")]
     ])
 
-    # Рассылка всем админам
     for admin in ADMINS:
         try:
             await bot.send_message(
@@ -113,9 +132,8 @@ async def user_confirm_payment(callback: CallbackQuery):
                 parse_mode="HTML"
             )
         except Exception as e:
-            logging.error(f"Не удалось отправить админу {admin}: {e}")
+            logging.error(f"Ошибка уведомления админа {admin}: {e}")
 
-# Когда админ нажал "Подтвердить"
 @router.callback_query(F.data.startswith("admin_approve_"))
 async def admin_approve(callback: CallbackQuery):
     data = callback.data.split("_")
@@ -124,33 +142,34 @@ async def admin_approve(callback: CallbackQuery):
 
     await callback.message.edit_text(f"✅ Вы подтвердили оплату для @{username}. Генерирую ключ...")
 
-    # Создаем ключ в панели
     link = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, username)
 
     if link:
-        # Пишем юзеру
         try:
             await bot.send_message(
                 user_id, 
-                f"✅ <b>Оплата подтверждена!</b>\n\nТвой доступ готов:\n{hcode(link)}\n\nИнструкция в /start",
+                f"✅ <b>Оплата подтверждена!</b>\n\nТвой доступ по тарифу <b>«Блатной»</b> готов:\n{hcode(link)}\n\nИнструкция в главном меню.",
                 parse_mode="HTML"
             )
-            # Сообщаем остальным админам, что уже подтверждено
             for admin in ADMINS:
                 if admin != callback.from_user.id:
-                    await bot.send_message(admin, f"🤝 Админ @{callback.from_user.username} уже выдал ключ для @{username}")
+                    await bot.send_message(admin, f"🤝 Админ @{callback.from_user.username} выдал доступ для @{username}")
         except Exception as e:
-            await callback.message.answer(f"Ошибка при отправке юзеру: {e}")
+            await callback.message.answer(f"Ошибка отправки пользователю: {e}")
     else:
-        await callback.message.answer("❌ Ошибка панели при создании ключа!")
-
-@router.callback_query(F.data == "to_main")
-async def to_main(callback: CallbackQuery):
-    await callback.message.edit_text("Выбери действие:", reply_markup=main_menu())
+        await callback.message.answer("❌ Ошибка панели 3X-UI!")
 
 @router.callback_query(F.data == "guide")
 async def show_guide(callback: CallbackQuery):
-    await callback.message.edit_text("📖 Инструкция: Скачай Happ и вставь ссылку.", reply_markup=main_menu())
+    guide_text = (
+        "📖 <b>Инструкция для Happ:</b>\n\n"
+        "1. Скачай приложение <b>Happ</b>.\n"
+        "2. Скопируй ссылку, выданную ботом.\n"
+        "3. В Happ: <b>Settings</b> -> <b>Subscription Group Settings</b>.\n"
+        "4. Нажми <b>«+»</b>, вставь ссылку и сохрани.\n"
+        "5. Выбери сервер и нажми кнопку подключения."
+    )
+    await callback.message.edit_text(guide_text, reply_markup=back_menu(), parse_mode="HTML")
 
 async def main():
     dp.include_router(router)
