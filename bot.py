@@ -10,7 +10,7 @@ import json
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.utils.markdown import hcode, hbold
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 
 # --- КОНФИГУРАЦИЯ ---
 API_TOKEN = os.getenv('BOT_TOKEN')
@@ -24,7 +24,6 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-# Контакт поддержки
 SUPPORT_CONTACT = "@vvvvvpppnn"
 
 logging.basicConfig(level=logging.INFO)
@@ -92,38 +91,50 @@ def get_vpn_link(user_id, username, expiry_ts):
     except: pass
     return "Error: Connection Failed"
 
-# --- ГЛАВНАЯ ПАНЕЛЬ ---
+# --- КЛАВИАТУРЫ ---
 def main_panel():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")],
-        [InlineKeyboardButton(text="💎 Тарифы и Оплата", callback_data="tariffs")],
-        [InlineKeyboardButton(text="🤝 Реферальная система", callback_data="ref_program")],
-        [InlineKeyboardButton(text="📖 Как подключить?", callback_data="guide")],
-        [InlineKeyboardButton(text="⚖️ Юр. информация", callback_data="rules_menu")]
+        [InlineKeyboardButton(text="💎 Купить VPN", callback_data="tariffs")],
+        [InlineKeyboardButton(text="🤝 Рефералы", callback_data="ref_program")],
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="guide")],
+        [InlineKeyboardButton(text="⚖️ Правила", callback_data="rules_menu")]
     ])
 
 def back_btn():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="to_main")]])
+
+# Кнопка под полем ввода (чтобы меню было всегда под рукой)
+main_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="/start")]], resize_keyboard=True)
 
 # --- АДМИН КОМАНДЫ ---
 @router.message(Command("give"))
 async def admin_give(message: types.Message, command: CommandObject):
     if message.from_user.id not in ADMINS: return
     uid = get_user_id_by_username(command.args)
-    if not uid: return await message.answer("❌ Пользователь не найден. Используйте: /give @username")
-    activate_user_in_db(uid, active=1)
-    await message.answer(f"✅ Подписка выдана (ID: {uid})")
-    try: await bot.send_message(uid, "🎁 Вам выдана подписка администратором!")
-    except: pass
+    if not uid: return await message.answer("❌ Используй: /give @username")
+    
+    uname = command.args.replace("@", "").lower()
+    new_exp = activate_user_in_db(uid, active=1)
+    
+    # Сразу генерируем ссылку для пользователя
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, uname, new_exp)
+    
+    text_user = f"🎁 <b>Вам выдана подписка!</b>\n\nВаша ссылка:\n{hcode(lnk)}\n\nИнструкция в меню /start"
+    try:
+        await bot.send_message(uid, text_user, parse_mode="HTML")
+        await message.answer(f"✅ Выдано @{uname}. Ссылка отправлена.")
+    except:
+        await message.answer(f"✅ В базе продлено. Ссылка: {hcode(lnk)}")
 
 @router.message(Command("take"))
 async def admin_take(message: types.Message, command: CommandObject):
     if message.from_user.id not in ADMINS: return
     uid = get_user_id_by_username(command.args)
-    if not uid: return await message.answer("❌ Пользователь не найден. Используйте: /take @username")
+    if not uid: return await message.answer("❌ Используй: /take @username")
     activate_user_in_db(uid, active=0)
-    await message.answer(f"🚫 Подписка аннулирована (ID: {uid})")
-    try: await bot.send_message(uid, "🔴 Ваша подписка была аннулирована.")
+    await message.answer(f"🚫 Подписка @{command.args} аннулирована.")
+    try: await bot.send_message(uid, "🔴 Ваша подписка была аннулирована администратором.")
     except: pass
 
 # --- ОБРАБОТЧИКИ ---
@@ -136,11 +147,8 @@ async def cmd_start(message: types.Message, command: CommandObject):
     cursor.execute('INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username', (message.from_user.id, username, r_id))
     conn.commit(); conn.close()
     
-    await message.answer(
-        f"🚀 {hbold('TrubaVPN Panel')}\n\nДобро пожаловать в центр управления VPN. Выберите нужный раздел кнопками ниже.",
-        reply_markup=main_panel(),
-        parse_mode="HTML"
-    )
+    await message.answer(f"🚀 {hbold('TrubaVPN Panel')}\n\nДобро пожаловать!", reply_markup=main_kb)
+    await message.answer("Выберите нужный раздел кнопками ниже:", reply_markup=main_panel(), parse_mode="HTML")
 
 @router.callback_query(F.data == "to_main")
 async def to_main(callback: CallbackQuery):
@@ -149,25 +157,27 @@ async def to_main(callback: CallbackQuery):
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
-    cursor.execute('SELECT expiry_date, is_active FROM users WHERE user_id = ?', (callback.from_user.id,))
+    cursor.execute('SELECT expiry_date, is_active, username FROM users WHERE user_id = ?', (callback.from_user.id,))
     d = cursor.fetchone(); conn.close()
     
-    status = "✅ Активна" if d and d[1] == 1 else "❌ Не активна"
-    date_str = time.strftime('%d.%m.%Y', time.localtime(d[0])) if d and d[1] == 1 else "—"
+    if not d or d[1] == 0:
+        return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nСтатус: ❌ Не активна\nКупите подписку в разделе «Тарифы».", reply_markup=back_btn(), parse_mode="HTML")
     
-    text = f"👤 <b>Личный кабинет</b>\n\nСтатус: {status}\nДействует до: {date_str}\n\nПоддержка: {SUPPORT_CONTACT}"
+    await callback.answer("⏳ Загружаю ссылку...")
+    expiry_ts, username = d[0], (d[2] or "user")
+    days = (expiry_ts - int(time.time())) // 86400
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, callback.from_user.id, username, expiry_ts)
+    
+    link_display = f"🔗 <b>Твоя ссылка:</b>\n{hcode(lnk)}" if lnk.startswith("http") else "⚠️ Ошибка API. Напиши в поддержку."
+    text = f"👤 <b>Личный кабинет</b>\n\nСтатус: ✅ Активна\nДо: {time.strftime('%d.%m.%Y', time.localtime(expiry_ts))} ({max(0, int(days))} дн.)\n\n{link_display}\n\nПоддержка: {SUPPORT_CONTACT}"
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
 @router.callback_query(F.data == "tariffs")
 async def show_tariffs(callback: CallbackQuery):
     sign = hashlib.md5(f"{FK_SHOP_ID}:250:{FK_SECRET_1}:RUB:ID_{callback.from_user.id}".encode()).hexdigest()
     url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa=250&currency=RUB&o=ID_{callback.from_user.id}&s={sign}"
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Купить (250₽ / мес)", url=url)],
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
-    ])
-    await callback.message.edit_text("💎 <b>Тариф «Блатной»</b>\n\n— 30 дней доступа\n— 3 устройства\n— No-Logs & Высокая скорость", reply_markup=markup, parse_mode="HTML")
+    m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить 250₽", url=url)], [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
+    await callback.message.edit_text("💎 <b>Тариф «Блатной»</b>\n\n30 дней / 50 ГБ / 3 устройства.", reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data == "ref_program")
 async def show_ref(callback: CallbackQuery):
@@ -175,53 +185,44 @@ async def show_ref(callback: CallbackQuery):
     cursor.execute('SELECT bought_friends FROM users WHERE user_id = ?', (callback.from_user.id,))
     row = cursor.fetchone(); conn.close()
     me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    text = f"🤝 <b>Рефералка</b>\n\nПригласи 5 друзей и получи месяц бесплатно!\n\nПрогресс: {row[0] if row else 0}/5\nСсылка:\n{hcode(link)}"
+    text = f"🤝 <b>Рефералка</b>\n\nПригласи 5 друзей и получи месяц!\n📈 Прогресс: {row[0] if row else 0}/5\n🔗 {hcode(f'https://t.me/{me.username}?start={callback.from_user.id}')}"
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
 @router.callback_query(F.data == "guide")
 async def show_guide(callback: CallbackQuery):
-    await callback.message.edit_text("📖 <b>Инструкция</b>\n\n1. Скачай V2RayTun.\n2. Купи подписку.\n3. Вставь ссылку из чата в приложение.", reply_markup=back_btn(), parse_mode="HTML")
+    await callback.message.edit_text("📖 <b>Инструкция</b>\n\n1. Скачай V2RayTun.\n2. Скопируй ссылку из ЛК.\n3. Вставь в приложение.", reply_markup=back_btn(), parse_mode="HTML")
 
 @router.callback_query(F.data == "rules_menu")
 async def rules_menu(callback: CallbackQuery):
-    m = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📜 Соглашение", callback_data="tos")],
-        [InlineKeyboardButton(text="🔒 Приватность", callback_data="privacy")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
-    ])
-    await callback.message.edit_text("⚖️ <b>Юридические данные</b>", reply_markup=m)
+    m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📜 Оферта", callback_data="tos")], [InlineKeyboardButton(text="🔒 Приватность", callback_data="privacy")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
+    await callback.message.edit_text("⚖️ Юридические данные", reply_markup=m)
 
 @router.callback_query(F.data == "tos")
 async def show_tos(callback: CallbackQuery):
-    text = f"📜 <b>Соглашение</b>\n\nМы имеем право менять условия в одностороннем порядке и аннулировать подписку за нарушения. Поддержка: {SUPPORT_CONTACT}"
-    await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
+    await callback.message.edit_text(f"📜 Мы вправе менять условия. Поддержка: {SUPPORT_CONTACT}", reply_markup=back_btn())
 
 @router.callback_query(F.data == "privacy")
 async def show_privacy(callback: CallbackQuery):
-    await callback.message.edit_text("🔒 <b>Приватность</b>\n\nМы не храним логи ваших посещений. Только ID для работы сервиса.", reply_markup=back_btn(), parse_mode="HTML")
+    await callback.message.edit_text("🔒 Мы не храним логи.", reply_markup=back_btn())
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    await callback.answer("⏳ Заявка на проверку отправлена!", show_alert=True)
-    m = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]
-    ])
+    await callback.answer("⏳ Заявка отправлена!", show_alert=True)
+    m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")], [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]])
     for a in ADMINS: 
         try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username}", reply_markup=m)
         except: pass
 
 @router.callback_query(F.data.startswith("adm_ap_"))
 async def adm_ap(callback: CallbackQuery):
-    data = callback.data.split("_")
-    uid, uname = int(data[2]), data[3]
+    d = callback.data.split("_")
+    uid, uname = int(d[2]), d[3]
     new_exp = activate_user_in_db(uid, active=1)
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, uname, new_exp)
     if lnk.startswith("http"):
         await bot.send_message(uid, f"✅ Оплата принята!\n\nТвоя ссылка:\n{hcode(lnk)}", parse_mode="HTML")
         await callback.message.edit_text(f"✅ Выдано для {uname}")
-    else: await callback.message.edit_text(f"❌ Ошибка панели")
+    else: await callback.message.edit_text("❌ Ошибка API")
 
 @router.callback_query(F.data == "admin_delete_msg")
 async def adm_del(callback: CallbackQuery): await callback.message.delete()
