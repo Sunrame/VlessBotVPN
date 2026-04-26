@@ -6,7 +6,7 @@ import time
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.filters import Command
 from aiogram.utils.markdown import hcode, hbold
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 import asyncio
 
 # --- НАСТРОЙКИ ИЗ VARIABLES ---
@@ -22,19 +22,17 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# Функция создания ключа с лимитами: 50ГБ и 30 дней
 def get_vpn_link(user_id, username):
     session = requests.Session()
     try:
         session.post(f"{PANEL_URL}/login", data={'username': LOGIN, 'password': PASSWORD}, timeout=10)
         
         client_uuid = str(uuid.uuid4())
-        # Привязываем юзернейм или ID, чтобы видеть в панели
+        # Привязываем юзернейм или ID для панели
         client_email = f"{username or 'user'}_{user_id}"
         
-        # Настройки лимитов
-        limit_gb = 50 * 1024 * 1024 * 1024  # 50 ГБ в байтах
-        duration = 30 * 24 * 60 * 60 * 1000 # 30 дней в миллисекундах
+        limit_gb = 50 * 1024 * 1024 * 1024
+        duration = 30 * 24 * 60 * 60 * 1000
         expiry_time = int((time.time() * 1000) + duration)
 
         add_url = f"{PANEL_URL}/panel/api/inbounds/addClient"
@@ -45,8 +43,8 @@ def get_vpn_link(user_id, username):
         
         response = session.post(add_url, json=payload, timeout=10)
         if response.json().get('success'):
-            # Ссылка для Happ
-            base_url = PANEL_URL.rsplit(':', 1)[0] # Отрезаем порт панели
+            # Корректное формирование ссылки
+            base_url = PANEL_URL.rsplit(':', 1)[0]
             final_link = f"{base_url}:{SUB_PORT}/sub/{client_uuid}?remark=TrubaVPN"
             return final_link
         return None
@@ -59,7 +57,7 @@ def main_menu():
     buttons = [
         [InlineKeyboardButton(text="💎 Тарифы", callback_data="tariffs")],
         [InlineKeyboardButton(text="📖 Инструкция", callback_data="guide")],
-        [InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/artemrogatykh")] # ЗАМЕНИ НА СВОЙ
+        [InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/твой_логин")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -73,59 +71,46 @@ def buy_menu():
 async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 Привет, {hbold(message.from_user.full_name)}!\n\n"
-        "Добро пожаловать в **TrubaVPN**. Здесь ты можешь приобрести скоростной доступ и получить инструкции по настройке.",
+        "Добро пожаловать в **TrubaVPN**. Выберите нужное действие ниже:",
         reply_markup=main_menu(),
         parse_mode="HTML"
     )
 
 @router.callback_query(F.data == "tariffs")
-async def show_tariffs(callback: types.Callback_query):
+async def show_tariffs(callback: CallbackQuery): # ИСПРАВЛЕНО ЗДЕСЬ
     await callback.message.edit_text(
         "🚀 **Доступные тарифы:**\n\n"
         "• **Standard**\n"
         "  — Срок: 30 дней\n"
         "  — Трафик: 50 ГБ\n"
         "  — Скорость: Без ограничений\n\n"
-        "Выбери тариф для оплаты:",
+        "Нажми кнопку ниже для покупки:",
         reply_markup=buy_menu(),
         parse_mode="HTML"
     )
 
 @router.callback_query(F.data == "guide")
-async def show_guide(callback: types.Callback_query):
+async def show_guide(callback: CallbackQuery): # ИСПРАВЛЕНО ЗДЕСЬ
     guide_text = (
         "📖 **Инструкция для Happ (iOS/Android):**\n\n"
-        "1. Скачай приложение **Happ** в AppStore или PlayMarket.\n"
-        "2. Скопируй ссылку, которую выдаст бот после покупки.\n"
-        "3. В Happ нажми кнопку **Settings** (Настройки).\n"
-        "4. Выбери пункт **Subscription Group Settings**.\n"
-        "5. Нажми на **«+»** и вставь скопированную ссылку.\n"
-        "6. Вернись на главный экран, выбери сервер и нажми кнопку подключения."
+        "1. Скачай приложение **Happ**.\n"
+        "2. Скопируй ссылку из бота.\n"
+        "3. В Happ зайди в **Settings** -> **Subscription Group Settings**.\n"
+        "4. Нажми **«+»**, вставь ссылку и сохрани.\n"
+        "5. Выбери сервер на главном экране и подключайся!"
     )
     await callback.message.edit_text(guide_text, reply_markup=main_menu(), parse_mode="HTML")
 
 @router.callback_query(F.data == "buy_standard")
-async def process_buy(callback: types.Callback_query):
-    await callback.message.answer("⏳ Генерирую твой личный ключ...")
+async def process_buy(callback: CallbackQuery): # ИСПРАВЛЕНО ЗДЕСЬ
+    await callback.answer("⏳ Создаю ключ...") # Всплывающее уведомление
     
-    # Создаем ключ
     link = await asyncio.get_event_loop().run_in_executor(
         None, get_vpn_link, callback.from_user.id, callback.from_user.username
     )
     
     if link:
         await callback.message.answer(
-            f"✅ **Оплата прошла успешно!**\n\n"
-            f"Твоя личная ссылка для Happ:\n{hcode(link)}\n\n"
-            "⚠️ *Не делитесь ссылкой с другими! Она привязана к вашему аккаунту.*",
-            parse_mode="HTML"
-        )
-    else:
-        await callback.message.answer("❌ Ошибка при создании ключа. Обратитесь в поддержку.")
-
-async def main():
-    dp.include_router(router)
-    await dp.start_polling(bot)
-
-if __name__ == '__main__':
-    asyncio.run(main())
+            f"✅ **Доступ активирован!**\n\n"
+            f"Твоя ссылка для Happ:\n{hcode(link)}\n\n"
+            "⚠️ Инструкция по установке в глав
