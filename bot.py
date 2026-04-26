@@ -222,7 +222,7 @@ async def show_ref(callback: CallbackQuery):
 
 @router.callback_query(F.data == "guide")
 async def show_guide(callback: CallbackQuery):
-    await callback.message.edit_text("📖 <b>Краткая инструкция</b>\n\n1. Скачай приложение (V2RayTun / Streisand).\n2. Скопируй ссылку из личного кабинета.\n3. Добавь её в приложение и нажми кнопку подключения.", reply_markup=back_btn(), parse_mode="HTML")
+    await callback.message.edit_text("📖 <b>Краткая инструкция</b>\n\n1. Скачай приложение Happ(ios/android/pc).\n2. Скопируй ссылку из личного кабинета.\n3. Добавь её в приложение и нажми кнопку подключения.", reply_markup=back_btn(), parse_mode="HTML")
 
 @router.callback_query(F.data == "rules_menu")
 async def rules_menu(callback: CallbackQuery):
