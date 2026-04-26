@@ -16,13 +16,14 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQu
 API_TOKEN = os.getenv('BOT_TOKEN')
 FK_SHOP_ID = os.getenv('FK_SHOP_ID')
 FK_SECRET_1 = os.getenv('FK_SECRET_1')
+# Убедись, что ID админов указаны верно
 ADMINS = [int(os.getenv('ADMIN_ID_1', 0)), int(os.getenv('ADMIN_ID_2', 0))]
 
-PANEL_URL = os.getenv('PANEL_URL')  # Напр: http://1.2.3.4:2053
+PANEL_URL = os.getenv('PANEL_URL') 
 SUB_PORT = os.getenv('SUB_PORT', '2096') 
 LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
-INBOUND_ID = 1  # УБЕДИСЬ, ЧТО ID В ПАНЕЛИ СОВПАДАЕТ
+INBOUND_ID = 1 # Проверь этот ID во вкладке Inbounds твоей панели!
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -51,14 +52,13 @@ def get_user_db_data(user_id):
     row = cursor.fetchone(); conn.close()
     return row
 
-def activate_user_in_db(user_id, active=1, custom_expiry=None, add_months=1):
+def activate_user_in_db(user_id, active=1, add_months=1):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
     cursor.execute('SELECT expiry_date FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
     now = int(time.time())
     added_time = add_months * 30 * 24 * 60 * 60
     expiry = (row[0] + added_time) if row and row[0] > now else (now + added_time)
-    if custom_expiry: expiry = custom_expiry
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ? WHERE user_id = ?', (active, expiry, user_id))
     conn.commit(); conn.close()
     return expiry
@@ -83,18 +83,10 @@ def get_vpn_link(user_id, username, expiry_ts):
     client_data = {"id": u_uuid, "alterId": 0, "email": email, "limitIp": 3, "totalGB": limit, "expiryTime": exp_ms, "enable": True, "subId": u_uuid}
     
     try:
-        # Пробуем добавить
         payload = {"id": INBOUND_ID, "settings": json.dumps({"clients": [client_data]})}
         r = session.post(f"{PANEL_URL}/panel/api/inbounds/addClient", json=payload, timeout=10)
         res = r.json()
         
-        # Если клиент уже был (например, перепокупка), пробуем обновить существующего по email
-        if not res.get('success') and "already exists" in res.get('msg', '').lower():
-            # В данном API обновление часто идет через addClient (зависит от версии), 
-            # но если не сработало, значит нужно сначала удалить старого.
-            # Для надежности просто вернем ошибку админу, чтобы он удалил дубликат в панели.
-            return f"Error: Клиент {email} уже есть в панели. Удали его вручную и нажми Выдать снова."
-
         if res.get('success'):
             host = PANEL_URL.split('://')[-1].split(':')[0]
             proto = PANEL_URL.split('://')[0]
@@ -104,7 +96,7 @@ def get_vpn_link(user_id, username, expiry_ts):
     except Exception as e:
         return f"System Error: {str(e)}"
 
-# --- МЕНЮ ---
+# --- КЛАВИАТУРЫ (Исправлено количество скобок) ---
 def main_markup():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")],
@@ -114,6 +106,9 @@ def main_markup():
         [InlineKeyboardButton(text="⚖️ Юр. информация", callback_data="rules_menu")]
     ])
 
+def back_to_main():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
+
 # --- ОБРАБОТЧИКИ ---
 
 @router.message(CommandStart())
@@ -122,7 +117,37 @@ async def cmd_start(message: types.Message, command: CommandObject):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
     cursor.execute('INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username', (message.from_user.id, (message.from_user.username or "user").lower(), r_id))
     conn.commit(); conn.close()
-    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nДобро пожаловать в <b>TrubaVPN</b>. Используя @trubavpnbot, вы принимаете условия соглашения.", reply_markup=main_markup(), parse_mode="HTML")
+    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nДобро пожаловать в <b>TrubaVPN</b>.", reply_markup=main_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data == "tariffs")
+async def show_tariffs(callback: CallbackQuery):
+    sign = hashlib.md5(f"{FK_SHOP_ID}:250:{FK_SECRET_1}:RUB:ID_{callback.from_user.id}".encode()).hexdigest()
+    url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa=250&currency=RUB&o=ID_{callback.from_user.id}&s={sign}"
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Купить подписку (250₽)", url=url)],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid_{callback.from_user.id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
+    ])
+    await callback.message.edit_text("🚀 <b>Тариф «Блатной»</b>\n\n— 30 дней доступа\n— Лимит трафика: 50 ГБ\n— До 3-х устройств одновременно", reply_markup=markup, parse_mode="HTML")
+
+@router.callback_query(F.data == "ref_program")
+async def show_ref(callback: CallbackQuery):
+    d = get_user_db_data(callback.from_user.id)
+    me = await bot.get_me()
+    count = d[1] if d else 0
+    text = (f"🤝 <b>Партнерская программа</b>\n\nПригласи 5 друзей, которые купят подписку, и получи <b>+30 дней</b> бесплатно!\n\n"
+            f"📈 Твой прогресс: <b>{count}/5</b>\n"
+            f"🔗 Ссылка: {hcode(f'https://t.me/{me.username}?start={callback.from_user.id}')}")
+    await callback.message.edit_text(text, reply_markup=back_to_main(), parse_mode="HTML")
+
+@router.callback_query(F.data == "guide")
+async def show_guide(callback: CallbackQuery):
+    text = ("📖 <b>Инструкция по подключению</b>\n\n"
+            "1. Скачайте приложение <b>V2RayTun</b> или <b>Hiddify Next</b>.\n"
+            "2. Получите ссылку в Личном кабинете (после покупки).\n"
+            "3. Скопируйте ссылку и импортируйте её в приложение.\n"
+            "4. Нажмите кнопку 'Подключиться'.")
+    await callback.message.edit_text(text, reply_markup=back_to_main(), parse_mode="HTML")
 
 @router.callback_query(F.data == "rules_menu")
 async def rules_menu(callback: CallbackQuery):
@@ -135,23 +160,12 @@ async def rules_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "tos")
 async def show_tos(callback: CallbackQuery):
-    text = (
-        "📜 <b>ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ</b>\n\n"
-        "1. <b>Общие правила:</b> Сервис предоставляется «как есть». Мы не несем ответственности за блокировки ресурсов.\n"
-        "2. <b>Право на изменения:</b> Администрация @trubavpnbot вправе в любое время в одностороннем порядке менять стоимость, лимиты и условия предоставления услуг без уведомления.\n"
-        "3. <b>Отказ в обслуживании:</b> Мы оставляем за собой право отозвать подписку без возврата средств при нарушении правил (спам, взломы, более 3-х устройств).\n"
-        "4. <b>Возврат:</b> Цифровые услуги обмену и возврату не подлежат."
-    )
+    text = "📜 <b>Пользовательское соглашение</b>\n\nАдминистрация вправе изменять условия и приостанавливать доступ при нарушении правил."
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rules_menu")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "privacy")
 async def show_privacy(callback: CallbackQuery):
-    text = (
-        "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
-        "1. <b>Данные:</b> Мы храним только ваш Telegram ID для работы подписки.\n"
-        "2. <b>No-Logs:</b> Мы принципиально не записываем историю ваших посещений и не храним данные о трафике.\n"
-        "3. <b>Согласие:</b> Пользуясь ботом, вы соглашаетесь на обработку этих данных."
-    )
+    text = "🔒 <b>Политика конфиденциальности</b>\n\nМы не храним логи вашего трафика. Только ID для работы подписки."
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rules_menu")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "profile")
@@ -161,38 +175,48 @@ async def show_profile(callback: CallbackQuery):
         await callback.message.edit_text("⚠️ Активной подписки нет.", reply_markup=main_markup())
         return
     days = (d[2] - int(time.time())) // 86400
-    await callback.message.edit_text(f"👤 <b>Кабинет</b>\n⏳ Дней: {max(0, int(days))}\n📱 Лимит: 3 устройства", reply_markup=main_markup(), parse_mode="HTML")
+    await callback.message.edit_text(f"👤 <b>Личный кабинет</b>\n\n⏳ Осталось дней: <b>{max(0, int(days))}</b>\n📱 Лимит устройств: 3", reply_markup=main_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data == "to_main")
+async def to_main(callback: CallbackQuery):
+    await callback.message.edit_text("Выберите действие:", reply_markup=main_markup())
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    await callback.message.answer("⏳ Заявка отправлена.")
-    m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")], [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]])
+    await callback.answer("⏳ Заявка отправлена модераторам!", show_alert=True)
+    m = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]
+    ])
     for a in ADMINS: 
-        try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username}", reply_markup=m)
+        try: await bot.send_message(a, f"💰 Оплата от: @{callback.from_user.username} (ID: {callback.from_user.id})", reply_markup=m)
         except: pass
 
 @router.callback_query(F.data.startswith("adm_ap_"))
 async def adm_ap(callback: CallbackQuery):
-    _, _, uid, uname = callback.data.split("_"); uid = int(uid)
-    new_expiry_ts = activate_user_in_db(uid, active=1, add_months=1)
+    data = callback.data.split("_")
+    uid = int(data[2])
+    uname = data[3]
     
-    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, uname, new_expiry_ts)
+    new_expiry = activate_user_in_db(uid, active=1, add_months=1)
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, uname, new_expiry)
     
     if lnk.startswith("http"):
-        await bot.send_message(uid, f"✅ Подписка активирована!\n\n{hcode(lnk)}", parse_mode="HTML")
-        await callback.message.edit_text(f"✅ Успешно выдано: {uname}")
+        await bot.send_message(uid, f"✅ Оплата подтверждена!\n\nТвоя ссылка для подключения:\n{hcode(lnk)}", parse_mode="HTML")
+        await callback.message.edit_text(f"✅ Выдано для @{uname}")
     else:
-        # Если ошибка — бот напишет ее админу прямо в чат
-        await callback.message.edit_text(f"❌ Ошибка: {lnk}")
+        await callback.message.edit_text(f"❌ Ошибка API: {lnk}")
 
 @router.callback_query(F.data == "admin_delete_msg")
-async def adm_del(callback: CallbackQuery): await callback.message.delete()
-
-@router.callback_query(F.data == "to_main")
-async def to_main(callback: CallbackQuery): await callback.message.edit_text("Меню:", reply_markup=main_markup())
+async def adm_del(callback: CallbackQuery):
+    await callback.message.delete()
 
 async def main():
-    dp.include_router(router); await dp.start_polling(bot)
+    dp.include_router(router)
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот остановлен")
