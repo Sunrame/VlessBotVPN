@@ -18,11 +18,11 @@ FK_SHOP_ID = os.getenv('FK_SHOP_ID')
 FK_SECRET_1 = os.getenv('FK_SECRET_1')
 ADMINS = [int(os.getenv('ADMIN_ID_1', 0)), int(os.getenv('ADMIN_ID_2', 0))]
 
-PANEL_URL = os.getenv('PANEL_URL')
+PANEL_URL = os.getenv('PANEL_URL')  # Напр: http://1.2.3.4:2053
 SUB_PORT = os.getenv('SUB_PORT', '2096') 
 LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
-INBOUND_ID = 1 
+INBOUND_ID = 1  # УБЕДИСЬ, ЧТО ID В ПАНЕЛИ СОВПАДАЕТ
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -53,18 +53,12 @@ def get_user_db_data(user_id):
 
 def activate_user_in_db(user_id, active=1, custom_expiry=None, add_months=1):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
-    cursor.execute('SELECT expiry_date, is_active FROM users WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT expiry_date FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
     now = int(time.time())
     added_time = add_months * 30 * 24 * 60 * 60
-    if custom_expiry:
-        expiry = custom_expiry
-    else:
-        if row and row[2] > now:
-            expiry = row[2] + added_time
-        else:
-            expiry = now + added_time
-    if active == 0: expiry = 0
+    expiry = (row[0] + added_time) if row and row[0] > now else (now + added_time)
+    if custom_expiry: expiry = custom_expiry
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ? WHERE user_id = ?', (active, expiry, user_id))
     conn.commit(); conn.close()
     return expiry
@@ -79,27 +73,36 @@ def get_3xui_session():
 
 def get_vpn_link(user_id, username, expiry_ts):
     session = get_3xui_session()
-    if not session: return None
+    if not session: return "Error: Ошибка входа в панель"
+    
     email = f"{(username or 'user').lower()}_{user_id}"
     u_uuid = str(uuid.uuid4())
     limit = 50 * 1024 * 1024 * 1024
     exp_ms = expiry_ts * 1000 
     
-    client_settings = {"id": u_uuid, "alterId": 0, "email": email, "limitIp": 3, "totalGB": limit, "expiryTime": exp_ms, "enable": True, "subId": u_uuid}
+    client_data = {"id": u_uuid, "alterId": 0, "email": email, "limitIp": 3, "totalGB": limit, "expiryTime": exp_ms, "enable": True, "subId": u_uuid}
     
     try:
-        payload = {"id": INBOUND_ID, "settings": json.dumps({"clients": [client_settings]})}
+        # Пробуем добавить
+        payload = {"id": INBOUND_ID, "settings": json.dumps({"clients": [client_data]})}
         r = session.post(f"{PANEL_URL}/panel/api/inbounds/addClient", json=payload, timeout=10)
         res = r.json()
         
+        # Если клиент уже был (например, перепокупка), пробуем обновить существующего по email
         if not res.get('success') and "already exists" in res.get('msg', '').lower():
-            session.post(f"{PANEL_URL}/panel/api/inbounds/updateClient/{u_uuid}", json=payload, timeout=10)
-            return f"{PANEL_URL.rsplit(':', 1)[0]}:{SUB_PORT}/sub/{u_uuid}?remark=TrubaVPN"
+            # В данном API обновление часто идет через addClient (зависит от версии), 
+            # но если не сработало, значит нужно сначала удалить старого.
+            # Для надежности просто вернем ошибку админу, чтобы он удалил дубликат в панели.
+            return f"Error: Клиент {email} уже есть в панели. Удали его вручную и нажми Выдать снова."
 
         if res.get('success'):
-            return f"{PANEL_URL.rsplit(':', 1)[0]}:{SUB_PORT}/sub/{u_uuid}?remark=TrubaVPN"
-    except: pass
-    return None
+            host = PANEL_URL.split('://')[-1].split(':')[0]
+            proto = PANEL_URL.split('://')[0]
+            return f"{proto}://{host}:{SUB_PORT}/sub/{u_uuid}?remark=TrubaVPN"
+        else:
+            return f"Panel Error: {res.get('msg')}"
+    except Exception as e:
+        return f"System Error: {str(e)}"
 
 # --- МЕНЮ ---
 def main_markup():
@@ -119,30 +122,25 @@ async def cmd_start(message: types.Message, command: CommandObject):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
     cursor.execute('INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username', (message.from_user.id, (message.from_user.username or "user").lower(), r_id))
     conn.commit(); conn.close()
-    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nДобро пожаловать в <b>TrubaVPN</b>. Используя @trubavpnbot, вы автоматически принимаете условия соглашения.", reply_markup=main_markup(), parse_mode="HTML")
+    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nДобро пожаловать в <b>TrubaVPN</b>. Используя @trubavpnbot, вы принимаете условия соглашения.", reply_markup=main_markup(), parse_mode="HTML")
 
 @router.callback_query(F.data == "rules_menu")
 async def rules_menu(callback: CallbackQuery):
     m = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📜 Пользовательское соглашение", callback_data="tos")],
-        [InlineKeyboardButton(text="🔒 Политика конфиденциальности", callback_data="privacy")],
+        [InlineKeyboardButton(text="📜 Соглашение", callback_data="tos")],
+        [InlineKeyboardButton(text="🔒 Приватность", callback_data="privacy")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
     ])
-    await callback.message.edit_text("⚖️ <b>Юридический отдел TrubaVPN</b>\n\nВыберите документ:", reply_markup=m, parse_mode="HTML")
+    await callback.message.edit_text("⚖️ <b>Юридическая информация</b>", reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data == "tos")
 async def show_tos(callback: CallbackQuery):
     text = (
         "📜 <b>ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ</b>\n\n"
-        "1. <b>Общие положения:</b> Настоящее Соглашение является публичной офертой. Используя @trubavpnbot, вы принимаете условия в полном объеме.\n\n"
-        "2. <b>Права Исполнителя:</b> Мы оставляем за собой право в одностороннем порядке:\n"
-        "— Изменять стоимость подписки и параметры тарифов;\n"
-        "— Приостанавливать доступ при обнаружении вредоносной активности;\n"
-        "— Редактировать текст Соглашения без предварительного уведомления.\n\n"
-        "3. <b>Ограничения:</b> Запрещено использование для DDoS, спама и взломов. Лимит — 3 устройства.\n\n"
-        "4. <b>Отказ от ответственности:</b> Сервис предоставляется «КАК ЕСТЬ». Мы не гарантируем доступность ресурсов, заблокированных РКН.\n\n"
-        "5. <b>Возврат:</b> Цифровой контент возврату не подлежит после активации.\n\n"
-        "🆘 Поддержка: @hhhhaahahaha"
+        "1. <b>Общие правила:</b> Сервис предоставляется «как есть». Мы не несем ответственности за блокировки ресурсов.\n"
+        "2. <b>Право на изменения:</b> Администрация @trubavpnbot вправе в любое время в одностороннем порядке менять стоимость, лимиты и условия предоставления услуг без уведомления.\n"
+        "3. <b>Отказ в обслуживании:</b> Мы оставляем за собой право отозвать подписку без возврата средств при нарушении правил (спам, взломы, более 3-х устройств).\n"
+        "4. <b>Возврат:</b> Цифровые услуги обмену и возврату не подлежат."
     )
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rules_menu")]]), parse_mode="HTML")
 
@@ -150,14 +148,9 @@ async def show_tos(callback: CallbackQuery):
 async def show_privacy(callback: CallbackQuery):
     text = (
         "🔒 <b>ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>\n\n"
-        "1. <b>Сбор данных:</b> Мы храним только ваш Telegram ID и сроки подписки для обеспечения работы сервиса.\n\n"
-        "2. <b>No-Logs Policy:</b> TrubaVPN <b>НЕ</b> собирает и <b>НЕ</b> хранит:\n"
-        "— Историю посещенных сайтов;\n"
-        "— Содержимое трафика и DNS-запросы;\n"
-        "— IP-адреса ресурсов.\n\n"
-        "3. <b>Безопасность:</b> Мы не передаем ваши данные третьим лицам.\n\n"
-        "4. <b>Изменения:</b> Продолжение использования бота после обновления Политики означает ваше автоматическое согласие.\n\n"
-        "🆘 Поддержка: @hhhhaahahaha"
+        "1. <b>Данные:</b> Мы храним только ваш Telegram ID для работы подписки.\n"
+        "2. <b>No-Logs:</b> Мы принципиально не записываем историю ваших посещений и не храним данные о трафике.\n"
+        "3. <b>Согласие:</b> Пользуясь ботом, вы соглашаетесь на обработку этих данных."
     )
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rules_menu")]]), parse_mode="HTML")
 
@@ -165,24 +158,14 @@ async def show_privacy(callback: CallbackQuery):
 async def show_profile(callback: CallbackQuery):
     d = get_user_db_data(callback.from_user.id)
     if not d or d[3] == 0:
-        await callback.message.edit_text("⚠️ <b>Нет активной подписки.</b>", reply_markup=main_markup(), parse_mode="HTML")
+        await callback.message.edit_text("⚠️ Активной подписки нет.", reply_markup=main_markup())
         return
     days = (d[2] - int(time.time())) // 86400
-    await callback.message.edit_text(f"👤 <b>Личный кабинет</b>\n\n⏳ Осталось: <b>{max(0, int(days))} дн.</b>\n📱 Лимит: 3 устройства", reply_markup=main_markup(), parse_mode="HTML")
-
-@router.callback_query(F.data == "tariffs")
-async def show_tariffs(callback: CallbackQuery):
-    sign = hashlib.md5(f"{FK_SHOP_ID}:250:{FK_SECRET_1}:RUB:ID_{callback.from_user.id}".encode()).hexdigest()
-    url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa=250&currency=RUB&o=ID_{callback.from_user.id}&s={sign}"
-    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Купить (250₽)", url=url)], [InlineKeyboardButton(text="✅ Оплачено", callback_data=f"paid_{callback.from_user.id}")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
-    await callback.message.edit_text("🚀 <b>Тариф «Блатной»</b>\n30 дней / 50 ГБ / 3 устройства", reply_markup=markup, parse_mode="HTML")
-
-@router.callback_query(F.data == "to_main")
-async def to_main(callback: CallbackQuery): await callback.message.edit_text("Выберите действие:", reply_markup=main_markup())
+    await callback.message.edit_text(f"👤 <b>Кабинет</b>\n⏳ Дней: {max(0, int(days))}\n📱 Лимит: 3 устройства", reply_markup=main_markup(), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    await callback.message.answer("⏳ Заявка на проверку отправлена админам.")
+    await callback.message.answer("⏳ Заявка отправлена.")
     m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")], [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]])
     for a in ADMINS: 
         try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username}", reply_markup=m)
@@ -192,15 +175,21 @@ async def user_paid(callback: CallbackQuery):
 async def adm_ap(callback: CallbackQuery):
     _, _, uid, uname = callback.data.split("_"); uid = int(uid)
     new_expiry_ts = activate_user_in_db(uid, active=1, add_months=1)
+    
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, uname, new_expiry_ts)
-    if lnk:
-        await bot.send_message(uid, f"✅ Подписка активирована!\n\nТвоя ссылка:\n{hcode(lnk)}", parse_mode="HTML")
-        await callback.message.edit_text(f"✅ Выдано для {uname}")
+    
+    if lnk.startswith("http"):
+        await bot.send_message(uid, f"✅ Подписка активирована!\n\n{hcode(lnk)}", parse_mode="HTML")
+        await callback.message.edit_text(f"✅ Успешно выдано: {uname}")
     else:
-        await callback.answer("Ошибка панели!", show_alert=True)
+        # Если ошибка — бот напишет ее админу прямо в чат
+        await callback.message.edit_text(f"❌ Ошибка: {lnk}")
 
 @router.callback_query(F.data == "admin_delete_msg")
 async def adm_del(callback: CallbackQuery): await callback.message.delete()
+
+@router.callback_query(F.data == "to_main")
+async def to_main(callback: CallbackQuery): await callback.message.edit_text("Меню:", reply_markup=main_markup())
 
 async def main():
     dp.include_router(router); await dp.start_polling(bot)
