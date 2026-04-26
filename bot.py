@@ -29,7 +29,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
@@ -55,14 +55,12 @@ def activate_user_in_db(user_id, active=1, custom_expiry=None, add_months=1):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
     cursor.execute('SELECT expiry_date, is_active FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
-    
     now = int(time.time())
     added_time = add_months * 30 * 24 * 60 * 60
     
     if custom_expiry:
         expiry = custom_expiry
     else:
-        # Если подписка активна и не истекла — продлеваем, иначе создаем новую
         if row and row[3] == 1 and row[2] > now:
             expiry = row[2] + added_time
         else:
@@ -72,7 +70,7 @@ def activate_user_in_db(user_id, active=1, custom_expiry=None, add_months=1):
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ? WHERE user_id = ?', (active, expiry, user_id))
     conn.commit(); conn.close()
 
-# --- ВЗАИМОДЕЙСТВИЕ С ПАНЕЛЬЮ 3X-UI ---
+# --- API ПАНЕЛИ ---
 def get_3xui_session():
     s = requests.Session()
     try:
@@ -88,20 +86,15 @@ def sync_with_panel(user_id, username):
         email = f"{(username or 'user').lower()}_{user_id}"
         obj = resp.json()['obj']
         clients = json.loads(obj['settings'])['clients']
-        client_stats = obj['clientStats']
-        
         c_set = next((c for c in clients if c['email'] == email), None)
-        c_stat = next((c for c in client_stats if c['email'] == email), None)
-
         if c_set and c_set.get('enable'):
             exp = c_set.get('expiryTime', 0) // 1000
             if exp > time.time() or exp == 0:
                 activate_user_in_db(user_id, active=1, custom_expiry=exp)
-                return {"used": c_stat.get('up', 0) + c_stat.get('down', 0), "limit": c_set.get('totalGB', 0), "expiry": exp}
-        
+                return True
         activate_user_in_db(user_id, active=0)
     except: pass
-    return None
+    return False
 
 def get_vpn_link(user_id, username):
     session = get_3xui_session()
@@ -109,7 +102,7 @@ def get_vpn_link(user_id, username):
     try:
         u_uuid = str(uuid.uuid4())
         email = f"{(username or 'user').lower()}_{user_id}"
-        limit = 50 * 1024 * 1024 * 1024 # 50 ГБ
+        limit = 50 * 1024 * 1024 * 1024
         exp = int((time.time() + (30 * 24 * 3600)) * 1000)
         payload = {"id": INBOUND_ID, "settings": json.dumps({"clients": [{"id": u_uuid, "alterId": 0, "email": email, "limitIp": 3, "totalGB": limit, "expiryTime": exp, "enable": True, "subId": u_uuid}]})}
         r = session.post(f"{PANEL_URL}/panel/api/inbounds/addClient", json=payload, timeout=10)
@@ -119,17 +112,17 @@ def get_vpn_link(user_id, username):
     except: pass
     return None
 
-# --- МЕНЮ ---
+# --- КНОПКИ ---
 def main_markup():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")],
         [InlineKeyboardButton(text="💎 Тарифы", callback_data="tariffs")],
         [InlineKeyboardButton(text="🤝 Партнерка", callback_data="ref_program")],
         [InlineKeyboardButton(text="📖 Инструкция", callback_data="guide")],
-        [InlineKeyboardButton(text="📜 Оферта", callback_data="rules")]
+        [InlineKeyboardButton(text="⚖️ Пользовательское соглашение", callback_data="rules")]
     ])
 
-# --- ОСНОВНЫЕ ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ ---
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject):
@@ -137,38 +130,38 @@ async def cmd_start(message: types.Message, command: CommandObject):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
     cursor.execute('INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username', (message.from_user.id, (message.from_user.username or "user").lower(), r_id))
     conn.commit(); conn.close()
-    
-    # Синхронизация при старте
     await asyncio.get_event_loop().run_in_executor(None, sync_with_panel, message.from_user.id, message.from_user.username)
-    
-    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!", reply_markup=main_markup(), parse_mode="HTML")
+    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nИспользуя бота, вы соглашаетесь с правилами сервиса.", reply_markup=main_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data == "rules")
+async def show_rules(callback: CallbackQuery):
+    rules_text = (
+        "⚖️ <b>Пользовательское соглашение</b>\n\n"
+        "1. Сервис предоставляет услуги доступа к частной сети (VPN) в ознакомительных целях.\n"
+        "2. Персональные данные: Бот сохраняет ваш Telegram ID и Username для идентификации доступа. Данные не передаются третьим лицам.\n"
+        "3. Ответственность: Пользователь несет полную ответственность за свои действия в сети Интернет при использовании сервиса. Запрещено использование сервиса для совершения противоправных действий согласно законодательству РФ.\n"
+        "4. Возврат: Цифровые товары (подписки) возврату не подлежат после активации доступа.\n"
+        "5. Ограничения: 1 аккаунт = до 3 устройств одновременно."
+    )
+    await callback.message.edit_text(rules_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
-    st = await asyncio.get_event_loop().run_in_executor(None, sync_with_panel, callback.from_user.id, callback.from_user.username)
+    await asyncio.get_event_loop().run_in_executor(None, sync_with_panel, callback.from_user.id, callback.from_user.username)
     d = get_user_db_data(callback.from_user.id)
-    
     if not d or d[3] == 0:
         await callback.message.edit_text("⚠️ <b>Нет активной подписки.</b>", reply_markup=main_markup(), parse_mode="HTML")
         return
-
     days = (d[2] - int(time.time())) // 86400
-    u_gb = round(st['used']/(1024**3), 2) if st else "0"
-    l_gb = round(st['limit']/(1024**3), 2) if st else "50"
-    
-    await callback.message.edit_text(
-        f"👤 <b>Личный кабинет</b>\n\n⏳ Осталось: <b>{max(0, int(days))} дн.</b>\n📊 Трафик: <b>{u_gb}/{l_gb} ГБ</b>\n📱 Лимит: 3 устройства", 
-        reply_markup=main_markup(), parse_mode="HTML"
-    )
+    await callback.message.edit_text(f"👤 <b>Личный кабинет</b>\n\n⏳ Осталось: <b>{max(0, int(days))} дн.</b>\n📱 Лимит: 3 устройства", reply_markup=main_markup(), parse_mode="HTML")
 
 @router.callback_query(F.data == "ref_program")
 async def show_ref(callback: CallbackQuery):
     d = get_user_db_data(callback.from_user.id); me = await bot.get_me()
     count = d[1] if d else 0
-    text = (f"🤝 <b>Партнерка</b>\n\nПригласи 5 друзей и получи <b>+1 месяц</b> к подписке!\n📈 Прогресс: <b>{count}/5</b>\n🔗 Ссылка: {hcode(f'https://t.me/{me.username}?start={callback.from_user.id}')}")
-    
+    text = (f"🤝 <b>Партнерка</b>\n\nПригласи 5 друзей и получи <b>+1 месяц</b>!\n📈 Прогресс: <b>{count}/5</b>\n🔗 Ссылка: {hcode(f'https://t.me/{me.username}?start={callback.from_user.id}')}\n\n<i>После 5 приглашений счетчик обнуляется.</i>")
     markup = []
-    if count >= 5: markup.append([InlineKeyboardButton(text="🎁 Забрать месяц", callback_data="claim_reward")])
+    if count >= 5: markup.append([InlineKeyboardButton(text="🎁 Забрать бонус", callback_data="claim_reward")])
     markup.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=markup), parse_mode="HTML")
 
@@ -180,25 +173,27 @@ async def claim_reward(callback: CallbackQuery):
         cursor.execute('UPDATE users SET bought_friends = bought_friends - 5 WHERE user_id = ?', (callback.from_user.id,))
         conn.commit(); conn.close()
         activate_user_in_db(callback.from_user.id, active=1, add_months=1)
-        await callback.answer("✅ Бонусный месяц начислен!", show_alert=True)
+        await callback.answer("✅ Бонус начислен!", show_alert=True)
         await show_ref(callback)
     else: conn.close()
 
-@router.callback_query(F.data == "rules")
-async def show_rules(callback: CallbackQuery):
-    text = "📜 <b>Оферта:</b>\n1. Бот хранит Telegram ID для работы.\n2. Не нарушайте законодательство РФ при использовании VPN.\n3. 1 аккаунт = 3 устройства."
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
+@router.callback_query(F.data == "tariffs")
+async def show_tariffs(callback: CallbackQuery):
+    sign = hashlib.md5(f"{FK_SHOP_ID}:250:{FK_SECRET_1}:RUB:ID_{callback.from_user.id}".encode()).hexdigest()
+    url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa=250&currency=RUB&o=ID_{callback.from_user.id}&s={sign}"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить 250₽", url=url)], [InlineKeyboardButton(text="✅ Я оплатил!", callback_data=f"paid_{callback.from_user.id}")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]])
+    await callback.message.edit_text("🚀 <b>Тариф «Блатной»</b>\n30 дней / 50 ГБ / 3 устройства", reply_markup=markup, parse_mode="HTML")
 
 @router.callback_query(F.data == "guide")
 async def show_guide(callback: CallbackQuery):
-    await callback.message.edit_text("📖 <b>Инструкция Happ:</b>\n1. Скачай приложение <b>Happ</b>.\n2. Копируй ссылку из бота.\n3. В Happ выбери 'Import from Clipboard'.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
+    await callback.message.edit_text("📖 <b>Инструкция Happ:</b>\n1. Скачай Happ.\n2. Копируй ссылку.\n3. Импортируй.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "to_main")
-async def to_main(callback: CallbackQuery): await callback.message.edit_text("Выберите раздел:", reply_markup=main_markup())
+async def to_main(callback: CallbackQuery): await callback.message.edit_text("Меню:", reply_markup=main_markup())
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    await callback.message.answer("⏳ Заявка отправлена администраторам.")
+    await callback.message.answer("⏳ Заявка отправлена.")
     m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")], [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]])
     for a in ADMINS: 
         try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username}", reply_markup=m)
@@ -217,16 +212,14 @@ async def adm_ap(callback: CallbackQuery):
             conn.commit()
         conn.close()
         activate_user_in_db(uid, active=1, add_months=1)
-        await bot.send_message(uid, f"✅ Подписка активирована!\n\n{hcode(lnk)}", parse_mode="HTML")
+        await bot.send_message(uid, f"✅ Доступ активирован!\n\n{hcode(lnk)}", parse_mode="HTML")
     await callback.message.edit_text(f"✅ Выдано {uname}")
 
 @router.callback_query(F.data == "admin_delete_msg")
 async def adm_del(callback: CallbackQuery): await callback.message.delete()
 
-# --- ЗАПУСК ---
 async def main():
-    dp.include_router(router)
-    await dp.start_polling(bot)
+    dp.include_router(router); await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
