@@ -51,6 +51,7 @@ def get_vpn_link(user_id, username):
         return None
 
 # --- КЛАВИАТУРЫ ---
+
 def main_menu():
     buttons = [
         [InlineKeyboardButton(text="💎 Тарифы", callback_data="tariffs")],
@@ -60,7 +61,14 @@ def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def buy_menu():
-    buttons = [[InlineKeyboardButton(text="⚡ Купить: 1 мес / 50 ГБ", callback_data="buy_standard")]]
+    buttons = [
+        [InlineKeyboardButton(text="⚡ Купить тариф «Блатной»", callback_data="buy_standard")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="to_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def back_only_menu():
+    buttons = [[InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="to_main")]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # --- ОБРАБОТЧИКИ ---
@@ -69,7 +77,16 @@ def buy_menu():
 async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 Привет, {hbold(message.from_user.full_name)}!\n\n"
-        "Добро пожаловать в **TrubaVPN**. Выберите нужное действие ниже:",
+        f"Добро пожаловать в <b>TrubaVPN</b>. Выберите нужное действие ниже:",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "to_main")
+async def back_to_main(callback: CallbackQuery):
+    await callback.message.edit_text(
+        f"👋 Привет, {hbold(callback.from_user.full_name)}!\n\n"
+        f"Добро пожаловать в <b>TrubaVPN</b>. Выберите нужное действие ниже:",
         reply_markup=main_menu(),
         parse_mode="HTML"
     )
@@ -77,11 +94,11 @@ async def cmd_start(message: types.Message):
 @router.callback_query(F.data == "tariffs")
 async def show_tariffs(callback: CallbackQuery):
     await callback.message.edit_text(
-        "🚀 **Доступные тарифы:**\n\n"
-        "• **Standard**\n"
-        "  — Срок: 30 дней\n"
-        "  — Трафик: 50 ГБ\n"
-        "  — Скорость: Без ограничений\n\n"
+        "🚀 <b>Доступные тарифы:</b>\n\n"
+        "• <b>Тариф «Блатной»</b>\n"
+        "  — <b>Срок:</b> 30 дней\n"
+        "  — <b>Трафик:</b> 50 ГБ\n"
+        "  — <b>Скорость:</b> Без ограничений\n\n"
         "Нажми кнопку ниже для покупки:",
         reply_markup=buy_menu(),
         parse_mode="HTML"
@@ -90,18 +107,18 @@ async def show_tariffs(callback: CallbackQuery):
 @router.callback_query(F.data == "guide")
 async def show_guide(callback: CallbackQuery):
     guide_text = (
-        "📖 **Инструкция для Happ (iOS/Android):**\n\n"
-        "1. Скачай приложение **Happ**.\n"
+        "📖 <b>Инструкция для Happ (iOS/Android):</b>\n\n"
+        "1. Скачай приложение <b>Happ</b>.\n"
         "2. Скопируй ссылку из бота.\n"
-        "3. В Happ зайди в **Settings** -> **Subscription Group Settings**.\n"
-        "4. Нажми **«+»**, вставь ссылку и сохрани.\n"
+        "3. В Happ зайди в <b>Settings</b> -> <b>Subscription Group Settings</b>.\n"
+        "4. Нажми <b>«+»</b>, вставь ссылку и сохрани.\n"
         "5. Выбери сервер на главном экране и подключайся!"
     )
-    await callback.message.edit_text(guide_text, reply_markup=main_menu(), parse_mode="HTML")
+    await callback.message.edit_text(guide_text, reply_markup=back_only_menu(), parse_mode="HTML")
 
 @router.callback_query(F.data == "buy_standard")
 async def process_buy(callback: CallbackQuery):
-    await callback.answer("⏳ Создаю ключ...")
+    await callback.answer("⏳ Генерирую доступ...")
     
     link = await asyncio.get_event_loop().run_in_executor(
         None, get_vpn_link, callback.from_user.id, callback.from_user.username
@@ -109,13 +126,14 @@ async def process_buy(callback: CallbackQuery):
     
     if link:
         await callback.message.answer(
-            f"✅ **Доступ активирован!**\n\n"
+            f"✅ <b>Тариф «Блатной» активирован!</b>\n\n"
             f"Твоя ссылка для Happ:\n{hcode(link)}\n\n"
             "⚠️ Инструкция по установке есть в главном меню.",
+            reply_markup=back_only_menu(),
             parse_mode="HTML"
         )
     else:
-        await callback.message.answer("❌ Ошибка панели. Напиши в поддержку.")
+        await callback.message.answer("❌ Ошибка панели. Напиши в поддержку.", reply_markup=back_only_menu())
 
 async def main():
     dp.include_router(router)
