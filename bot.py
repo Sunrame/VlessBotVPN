@@ -64,7 +64,6 @@ def get_user_db_data(user_id):
 
 def activate_user_in_db(user_id, active=1):
     conn = sqlite3.connect('users.db'); cursor = conn.cursor()
-    # Сохраняем дату как число (timestamp)
     expiry = int(time.time() + (30 * 24 * 60 * 60)) if active == 1 else 0
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ? WHERE user_id = ?', (active, expiry, user_id))
     conn.commit(); conn.close()
@@ -107,9 +106,25 @@ def get_vpn_link(user_id, username):
     try:
         u_uuid = str(uuid.uuid4())
         email = f"{username or 'user'}_{user_id}"
-        limit = 50 * 1024 * 1024 * 1024
+        limit_traffic = 50 * 1024 * 1024 * 1024
         exp = int((time.time() + (30 * 24 * 3600)) * 1000)
-        payload = {"id": INBOUND_ID, "settings": json.dumps({"clients": [{"id": u_uuid, "alterId": 0, "email": email, "limitIp": 1, "totalGB": limit, "expiryTime": exp, "enable": True, "subId": u_uuid}]})}
+        
+        # limitIp: 3 — ограничение на 3 устройства (IP)
+        payload = {
+            "id": INBOUND_ID, 
+            "settings": json.dumps({
+                "clients": [{
+                    "id": u_uuid, 
+                    "alterId": 0, 
+                    "email": email, 
+                    "limitIp": 3, 
+                    "totalGB": limit_traffic, 
+                    "expiryTime": exp, 
+                    "enable": True, 
+                    "subId": u_uuid
+                }]
+            })
+        }
         r = session.post(f"{PANEL_URL}/panel/api/inbounds/addClient", json=payload, timeout=10)
         if r.json().get('success'):
             host = PANEL_URL.rsplit(':', 1)[0]
@@ -137,28 +152,13 @@ async def cmd_start(message: types.Message, command: CommandObject):
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     d = get_user_db_data(callback.from_user.id)
-    # d = (referrer_id, bought_friends, reward_claimed, expiry_date, is_active)
-    
-    # ПРОВЕРКА: Если в базе флаг is_active не равен 1
     if not d or int(d[4]) != 1:
-        await callback.message.edit_text("⚠️ <b>Нет активной подписки.</b>\n\nКупите тариф, чтобы пользоваться VPN.", reply_markup=main_markup(), parse_mode="HTML")
+        await callback.message.edit_text("⚠️ <b>Нет активной подписки.</b>", reply_markup=main_markup(), parse_mode="HTML")
         return
-    
     st = get_user_stats(callback.from_user.id, callback.from_user.username)
-    
-    # Считаем разницу между сохраненным timestamp и текущим
-    now = int(time.time())
-    expiry_ts = int(d[3]) if d[3] else 0
-    days = (expiry_ts - now) // 86400
-    
+    days = (int(d[3]) - int(time.time())) // 86400
     u, l = (round(st['used']/(1024**3), 2), round(st['limit']/(1024**3), 2)) if st else ("??", "50")
-    
-    text = (f"👤 <b>Личный кабинет</b>\n\n"
-            f"📋 Тариф: «Блатной»\n"
-            f"⏳ Осталось дней: {max(0, int(days))}\n"
-            f"📊 Трафик: {u} / {l} ГБ")
-    
-    await callback.message.edit_text(text, reply_markup=main_markup(), parse_mode="HTML")
+    await callback.message.edit_text(f"👤 <b>ЛК</b>\n\n⏳ Осталось: {max(0, int(days))} дн.\n📊 Трафик: {u}/{l} ГБ\n📱 Лимит: 3 устройства", reply_markup=main_markup(), parse_mode="HTML")
 
 @router.callback_query(F.data == "tariffs")
 async def show_tariffs(callback: CallbackQuery):
@@ -169,14 +169,14 @@ async def show_tariffs(callback: CallbackQuery):
         [InlineKeyboardButton(text="✅ Я оплатил!", callback_data=f"paid_{callback.from_user.id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
     ])
-    await callback.message.edit_text("🚀 <b>Тариф «Блатной»</b>\n30 дней / 50 ГБ", reply_markup=markup, parse_mode="HTML")
+    await callback.message.edit_text("🚀 <b>Тариф «Блатной»</b>\n30 дней / 50 ГБ / 3 устройства", reply_markup=markup, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    await callback.message.answer("⏳ Запрос отправлен админам. Ожидайте подтверждения.")
+    await callback.message.answer("⏳ Запрос отправлен админам.")
     m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")], [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]])
     for a in ADMINS: 
-        try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username} (ID: {callback.from_user.id})", reply_markup=m)
+        try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username}", reply_markup=m)
         except: pass
 
 @router.callback_query(F.data.startswith("adm_ap_"))
@@ -185,15 +185,8 @@ async def adm_ap(callback: CallbackQuery):
     uid = int(uid)
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, uname)
     if lnk:
-        activate_user_in_db(uid, active=1) # ОБЯЗАТЕЛЬНО АКТИВИРУЕМ В БД
+        activate_user_in_db(uid, active=1)
         await bot.send_message(uid, f"✅ Доступ готов:\n{hcode(lnk)}")
-        
-        # Рефералка
-        u_data = get_user_db_data(uid)
-        if u_data and u_data[0]:
-            ref_id = u_data[0]
-            conn = sqlite3.connect('users.db'); conn.execute('UPDATE users SET bought_friends = bought_friends + 1 WHERE user_id = ?', (ref_id,)); conn.commit(); conn.close()
-
     await callback.message.edit_text(f"✅ Выдано для @{uname}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]]))
 
 @router.message(Command("give"))
@@ -209,7 +202,7 @@ async def admin_give(message: types.Message, command: CommandObject):
         if lnk:
             activate_user_in_db(r[0], active=1)
             await bot.send_message(r[0], f"🎁 Доступ выдан!\n{hcode(lnk)}")
-            await message.answer(f"✅ Успешно выдано {r[1]}")
+            await message.answer(f"✅ Выдано {r[1]}")
     else: await message.answer("❌ Юзер не найден.")
 
 @router.message(Command("take"))
@@ -221,10 +214,10 @@ async def admin_take(message: types.Message, command: CommandObject):
     else: c.execute('SELECT user_id, username FROM users WHERE username = ?', (t,))
     r = c.fetchone(); conn.close()
     if r:
-        deleted = await asyncio.get_event_loop().run_in_executor(None, delete_vpn_client, r[0], r[1])
-        activate_user_in_db(r[0], active=0) # ДЕАКТИВИРУЕМ
-        await bot.send_message(r[0], "⚠️ Ваша подписка была аннулирована.")
-        await message.answer(f"🚫 Подписка у @{r[1]} отобрана.")
+        await asyncio.get_event_loop().run_in_executor(None, delete_vpn_client, r[0], r[1])
+        activate_user_in_db(r[0], active=0)
+        await bot.send_message(r[0], "⚠️ Подписка аннулирована.")
+        await message.answer(f"🚫 Доступ у @{r[1]} отозван.")
     else: await message.answer("❌ Юзер не найден.")
 
 @router.callback_query(F.data == "ref_program")
