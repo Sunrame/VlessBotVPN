@@ -89,14 +89,31 @@ def get_user_stats(user_id, username):
     session = get_3xui_session()
     if not session: return None
     try:
+        # Получаем данные инбаунда
         resp = session.get(f"{PANEL_URL}/panel/api/inbounds/get/{INBOUND_ID}", timeout=10)
         data = resp.json()
         settings = json.loads(data['obj']['settings'])
         email = f"{username or 'user'}_{user_id}"
+        
+        # Получаем список онлайн-клиентов (зависит от версии панели, обычно в /panel/api/inbounds/onlines)
+        onlines_resp = session.post(f"{PANEL_URL}/panel/api/inbounds/onlines", timeout=10)
+        onlines = onlines_resp.json().get('obj', [])
+        
+        # Считаем активные IP для конкретного email
+        active_ips = 0
+        for online_email in onlines:
+            if online_email == email:
+                active_ips += 1
+
         stats = next((c for c in data['obj']['clientStats'] if c['email'] == email), None)
         sett = next((c for c in settings['clients'] if c['email'] == email), None)
+        
         if stats and sett:
-            return {"used": stats.get('up', 0) + stats.get('down', 0), "limit": sett.get('totalGB', 0)}
+            return {
+                "used": stats.get('up', 0) + stats.get('down', 0), 
+                "limit": sett.get('totalGB', 0),
+                "online": active_ips
+            }
     except: pass
     return None
 
@@ -109,19 +126,12 @@ def get_vpn_link(user_id, username):
         limit_traffic = 50 * 1024 * 1024 * 1024
         exp = int((time.time() + (30 * 24 * 3600)) * 1000)
         
-        # limitIp: 3 — ограничение на 3 устройства (IP)
         payload = {
             "id": INBOUND_ID, 
             "settings": json.dumps({
                 "clients": [{
-                    "id": u_uuid, 
-                    "alterId": 0, 
-                    "email": email, 
-                    "limitIp": 3, 
-                    "totalGB": limit_traffic, 
-                    "expiryTime": exp, 
-                    "enable": True, 
-                    "subId": u_uuid
+                    "id": u_uuid, "alterId": 0, "email": email, "limitIp": 3, 
+                    "totalGB": limit_traffic, "expiryTime": exp, "enable": True, "subId": u_uuid
                 }]
             })
         }
@@ -155,10 +165,19 @@ async def show_profile(callback: CallbackQuery):
     if not d or int(d[4]) != 1:
         await callback.message.edit_text("⚠️ <b>Нет активной подписки.</b>", reply_markup=main_markup(), parse_mode="HTML")
         return
+    
     st = get_user_stats(callback.from_user.id, callback.from_user.username)
     days = (int(d[3]) - int(time.time())) // 86400
     u, l = (round(st['used']/(1024**3), 2), round(st['limit']/(1024**3), 2)) if st else ("??", "50")
-    await callback.message.edit_text(f"👤 <b>ЛК</b>\n\n⏳ Осталось: {max(0, int(days))} дн.\n📊 Трафик: {u}/{l} ГБ\n📱 Лимит: 3 устройства", reply_markup=main_markup(), parse_mode="HTML")
+    online = st['online'] if st and 'online' in st else 0
+    
+    await callback.message.edit_text(
+        f"👤 <b>Личный кабинет</b>\n\n"
+        f"⏳ Осталось: {max(0, int(days))} дн.\n"
+        f"📊 Трафик: {u}/{l} ГБ\n"
+        f"📱 Устройств онлайн: <b>{online}/3</b>", 
+        reply_markup=main_markup(), parse_mode="HTML"
+    )
 
 @router.callback_query(F.data == "tariffs")
 async def show_tariffs(callback: CallbackQuery):
