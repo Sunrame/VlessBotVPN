@@ -57,7 +57,6 @@ def activate_user_in_db(user_id, active=1, custom_expiry=None, add_months=1):
     row = cursor.fetchone()
     now = int(time.time())
     added_time = add_months * 30 * 24 * 60 * 60
-    
     if custom_expiry:
         expiry = custom_expiry
     else:
@@ -65,7 +64,6 @@ def activate_user_in_db(user_id, active=1, custom_expiry=None, add_months=1):
             expiry = row[2] + added_time
         else:
             expiry = now + added_time
-            
     if active == 0: expiry = 0
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ? WHERE user_id = ?', (active, expiry, user_id))
     conn.commit(); conn.close()
@@ -124,7 +122,7 @@ def main_markup():
         [InlineKeyboardButton(text="💎 Тарифы", callback_data="tariffs")],
         [InlineKeyboardButton(text="🤝 Партнерка", callback_data="ref_program")],
         [InlineKeyboardButton(text="📖 Инструкция", callback_data="guide")],
-        [InlineKeyboardButton(text="⚖️ Юридическая информация", callback_data="rules")]
+        [InlineKeyboardButton(text="⚖️ Юр. информация", callback_data="rules_menu")]
     ])
 
 # --- ОБРАБОТЧИКИ ---
@@ -136,25 +134,65 @@ async def cmd_start(message: types.Message, command: CommandObject):
     cursor.execute('INSERT INTO users (user_id, username, referrer_id) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username = EXCLUDED.username', (message.from_user.id, (message.from_user.username or "user").lower(), r_id))
     conn.commit(); conn.close()
     await asyncio.get_event_loop().run_in_executor(None, sync_with_panel, message.from_user.id, message.from_user.username)
-    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nИспользуя TrubaVPN, вы соглашаетесь с условиями оферты и политикой конфиденциальности.", reply_markup=main_markup(), parse_mode="HTML")
+    await message.answer(f"👋 Привет, {hbold(message.from_user.full_name)}!\n\nДобро пожаловать в TrubaVPN. Используя бота, вы принимаете условия оферты.", reply_markup=main_markup(), parse_mode="HTML")
 
-@router.callback_query(F.data == "rules")
-async def show_rules(callback: CallbackQuery):
-    rules_text = (
-        "⚖️ <b>ЮРИДИЧЕСКАЯ ИНФОРМАЦИЯ TrubaVPN</b>\n\n"
-        "<b>1. Пользовательское соглашение</b>\n"
-        "• TrubaVPN предоставляет доступ в ознакомительных целях.\n"
-        "• Лимит: <b>1 аккаунт = 3 устройства</b>.\n"
-        "• Запрещены любые противоправные действия.\n\n"
-        "<b>2. Политика конфиденциальности (No-Logs)</b>\n"
-        "• Мы сохраняем только ваш Telegram ID и сроки подписки.\n"
-        "• Мы <b>НЕ</b> собираем: историю посещений, DNS-запросы и содержимое трафика.\n"
-        "• Данные об оплате не содержат ваших банковских реквизитов.\n\n"
-        "<b>3. Отказ от ответственности</b>\n"
-        "• Сервис предоставляется «как есть». Мы не гарантируем доступ к ресурсам, заблокированным РКН.\n\n"
-        "🆘 <b>Поддержка:</b> @hhhhaahahaha"
+# Меню выбора юр. документов
+@router.callback_query(F.data == "rules_menu")
+async def rules_menu(callback: CallbackQuery):
+    m = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📜 Пользовательское соглашение", callback_data="tos")],
+        [InlineKeyboardButton(text="🔒 Политика конфиденциальности", callback_data="privacy")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
+    ])
+    await callback.message.edit_text("⚖️ <b>Юридическая информация TrubaVPN</b>\n\nВыберите документ для ознакомления:", reply_markup=m, parse_mode="HTML")
+
+@router.callback_query(F.data == "tos")
+async def show_tos(callback: CallbackQuery):
+    text = (
+        "📜 <b>Пользовательское соглашение TrubaVPN</b>\n\n"
+        "<b>1. Общие положения</b>\n"
+        "1.1. Настоящие Условия регулируют порядок оказания услуг VPN.\n"
+        "1.2. Используя Сервис, Пользователь принимает их в полном объёме.\n"
+        "1.3. Услуги только для личного использования. Передача доступа запрещена.\n\n"
+        "<b>2. Описание Сервиса</b>\n"
+        "2.1. Техническая возможность безопасного интернет-соединения.\n"
+        "2.2. Исполнитель обеспечивает лишь транспортировку данных.\n\n"
+        "<b>3. Использование бота</b>\n"
+        "3.1. Управление через @TrubaVPN_bot (замените на ваш юзернейм).\n"
+        "3.2. Пользователь передает Telegram ID добровольно.\n\n"
+        "<b>4. Обязанности Пользователя</b>\n"
+        "4.1. Запрещено: нарушение закона, рассылка спама, DDoS-атаки, нарушение авторских прав.\n"
+        "4.2. Ограничение: до 3-х устройств одновременно.\n\n"
+        "<b>5. Права Исполнителя</b>\n"
+        "5.1. Изменение тарифов в одностороннем порядке.\n"
+        "5.2. Приостановка доступа при нарушении Условий.\n\n"
+        "<b>6. Возврат</b>\n"
+        "6.1. Цифровые товары возврату не подлежат после активации.\n\n"
+        "<b>7. Ответственность</b>\n"
+        "7.1. «Как есть». Мы не несем ответственности за действия РКН и провайдеров.\n\n"
+        "🆘 Поддержка: @hhhhaahahaha"
     )
-    await callback.message.edit_text(rules_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rules_menu")]]), parse_mode="HTML")
+
+@router.callback_query(F.data == "privacy")
+async def show_privacy(callback: CallbackQuery):
+    text = (
+        "🔒 <b>Политика конфиденциальности TrubaVPN</b>\n\n"
+        "<b>1. Сбор данных</b>\n"
+        "Мы обрабатываем только минимальный перечень:\n"
+        "• Telegram User ID и язык интерфейса;\n"
+        "• Статус подписки и созданные ключи;\n"
+        "• Факт оплаты (без реквизитов карт).\n\n"
+        "<b>2. Принцип No-Logs</b>\n"
+        "Мы <b>КАТЕГОРИЧЕСКИ НЕ</b> собираем:\n"
+        "• Историю посещений и содержимое трафика;\n"
+        "• IP-адреса сайтов и DNS-запросы;\n"
+        "• Время входа/выхода на конкретные ресурсы.\n\n"
+        "<b>3. Изменения</b>\n"
+        "Исполнитель вправе обновлять Политику. Продолжение использования — согласие с новой версией.\n\n"
+        "🆘 Контакт для связи: @hhhhaahahaha"
+    )
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rules_menu")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
@@ -200,11 +238,11 @@ async def show_guide(callback: CallbackQuery):
     await callback.message.edit_text("📖 <b>Инструкция Happ:</b>\n1. Скачай Happ.\n2. Копируй ссылку.\n3. Импортируй.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "to_main")
-async def to_main(callback: CallbackQuery): await callback.message.edit_text("Меню:", reply_markup=main_markup())
+async def to_main(callback: CallbackQuery): await callback.message.edit_text("Выберите раздел:", reply_markup=main_markup())
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    await callback.message.answer("⏳ Заявка отправлена администраторам.")
+    await callback.message.answer("⏳ Заявка отправлена.")
     m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдать", callback_data=f"adm_ap_{callback.from_user.id}_{callback.from_user.username or 'user'}")], [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete_msg")]])
     for a in ADMINS: 
         try: await bot.send_message(a, f"💰 Оплата: @{callback.from_user.username}", reply_markup=m)
