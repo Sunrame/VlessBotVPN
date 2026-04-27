@@ -30,7 +30,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- БЛОК БАЗЫ ДАННЫХ (ВЕЧНАЯ ПАМЯТЬ) ---
+# --- БЛОК БАЗЫ ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
@@ -55,7 +55,7 @@ def get_user_data(user_id):
     conn.close()
     return row
 
-async def activate_user_in_db(user_id, plan='standart', active=1, months=1):
+async def activate_user_in_db(user_id, plan='Стандарт', active=1, months=1):
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
     now = int(time.time())
@@ -70,7 +70,6 @@ async def activate_user_in_db(user_id, plan='standart', active=1, months=1):
     
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ?, current_plan = ? WHERE user_id = ?', (active, expiry, plan, user_id))
     
-    # ЛОГИКА ДЛЯ ПРИГЛАСИТЕЛЯ (РЕФЕРАЛА)
     if active == 1 and not already_active and ref_id:
         cursor.execute('UPDATE users SET bought_friends = bought_friends + 1 WHERE user_id = ?', (ref_id,))
         cursor.execute('SELECT bought_friends, expiry_date FROM users WHERE user_id = ?', (ref_id,))
@@ -78,16 +77,11 @@ async def activate_user_in_db(user_id, plan='standart', active=1, months=1):
         
         if ref_data:
             friends_count = ref_data[0]
-            # Если это ровно 5-й друг — даем бесконечность
             if friends_count == 5:
                 forever_expiry = now + (100 * 365 * 24 * 60 * 60) # +100 лет
-                cursor.execute('UPDATE users SET expiry_date = ?, is_active = 1, current_plan = "Premium Plus" WHERE user_id = ?', (forever_expiry, ref_id))
-                try: await bot.send_message(ref_id, "🔥 ЛЕГЕНДА! Вы пригласили 5 друзей. Вам начислена БЕСКОНЕЧНАЯ подписка!")
+                cursor.execute('UPDATE users SET expiry_date = ?, is_active = 1, current_plan = "Премиум" WHERE user_id = ?', (forever_expiry, ref_id))
+                try: await bot.send_message(ref_id, "🔥 <b>ЛЕГЕНДА!</b>\nВы пригласили 5 друзей. Вам начислена <b>БЕСКОНЕЧНАЯ</b> подписка (тариф Премиум)!")
                 except: pass
-            # Если друзей больше 5 (бонус за каждые следующие 5, если хочешь)
-            elif friends_count > 0 and friends_count % 5 == 0:
-                # Тут можно оставить стандартный бонус или ничего не делать
-                pass
     
     conn.commit()
     conn.close()
@@ -101,15 +95,15 @@ def get_3xui_session():
         return s if r.status_code == 200 else None
     except: return None
 
-def get_vpn_link(user_id, expiry_ts, plan='standart'):
+def get_vpn_link(user_id, expiry_ts, plan='Стандарт'):
     session = get_3xui_session()
     if not session: return "Ошибка связи"
     limits = {
-        'standart': {'gb': 50, 'ips': 1}, 
-        'premium': {'gb': 0, 'ips': 1}, 
-        'premium_plus': {'gb': 0, 'ips': 3}
+        'Стандарт': {'gb': 50, 'ips': 1}, 
+        'Стандарт +': {'gb': 0, 'ips': 1}, 
+        'Премиум': {'gb': 0, 'ips': 3}
     }
-    config = limits.get(plan, limits['standart'])
+    config = limits.get(plan, limits['Стандарт'])
     u_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"truba_v2_{user_id}"))
     limit_bytes = config['gb'] * 1024 * 1024 * 1024 if config['gb'] > 0 else 0
     
@@ -117,7 +111,7 @@ def get_vpn_link(user_id, expiry_ts, plan='standart'):
     try:
         session.post(f"{PANEL_URL.strip('/')}/panel/api/inbounds/addClient", json=payload, timeout=10)
         host = PANEL_URL.split('://')[-1].split(':')[0]
-        return f"{PANEL_URL.split('://')[0]}://{host}:{SUB_PORT}/sub/{u_uuid}?remark=Truba_{plan.capitalize()}"
+        return f"{PANEL_URL.split('://')[0]}://{host}:{SUB_PORT}/sub/{u_uuid}?remark=Truba_{plan.replace(' ', '_')}"
     except: return "Ошибка VPN"
 
 # --- КЛАВИАТУРЫ ---
@@ -155,55 +149,42 @@ async def show_tariffs(callback: CallbackQuery):
         "🔹 <b>Стандарт — 100₽ / мес</b>\n"
         "— Лимит трафика: 50 ГБ\n"
         "— Устройств: 1\n\n"
-        "⭐ <b>Премиум — 150₽ / мес</b>\n"
+        "⭐ <b>Стандарт + — 150₽ / мес</b>\n"
         "— Лимит трафика: БЕЗЛИМИТ\n"
         "— Устройств: 1\n\n"
-        "👑 <b>Премиум Plus — 300₽ / мес</b>\n"
+        "👑 <b>Премиум — 300₽ / мес</b>\n"
         "— Лимит трафика: БЕЗЛИМИТ\n"
-        "— Устройств: 3"
+        "— Устройств: 3\n\n"
+        "🔥 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи <b>БЕЗЛИМИТ НАВСЕГДА!</b>"
     )
     btns = [
         [InlineKeyboardButton(text="Стандарт (100₽)", callback_data="buy_standart")],
-        [InlineKeyboardButton(text="Премиум (150₽)", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="Премиум Plus (300₽)", callback_data="buy_premium_plus")],
+        [InlineKeyboardButton(text="Стандарт + (150₽)", callback_data="buy_standart_plus")],
+        [InlineKeyboardButton(text="Премиум (300₽)", callback_data="buy_premium")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
     ]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
-@router.callback_query(F.data.startswith("buy_"))
-async def process_buy(callback: CallbackQuery):
-    plan = callback.data.split("_")[1]
-    if "plus" in callback.data: plan = "premium_plus"
-    prices = {"standart": 100, "premium": 150, "premium_plus": 300}
-    price = prices.get(plan, 100)
-    url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa={price}&currency=RUB&o=ID_{callback.from_user.id}_{plan}"
-    m = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {price}₽", url=url)],
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{plan}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]
-    ])
-    await callback.message.edit_text(f"Вы выбрали тариф <b>{plan.replace('_', ' ').capitalize()}</b>.", reply_markup=m, parse_mode="HTML")
-
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     d = get_user_data(callback.from_user.id)
+    if d is None: return await callback.answer("Ошибка: данные не найдены. Нажмите /start", show_alert=True)
+        
     now = int(time.time())
-    if not d or d[1] == 0 or d[0] < now:
+    if d[1] == 0 or d[0] < now:
         return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", reply_markup=back_btn(), parse_mode="HTML")
     
     await callback.answer("🔄 Загрузка...")
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, callback.from_user.id, d[0], d[3])
-    text = f"👤 <b>Личный кабинет</b>\nТариф: {d[3].replace('_', ' ').capitalize()}\nДо: {time.strftime('%d.%m.%Y', time.localtime(d[0]))}\n\n🔗 <b>Ссылка:</b>\n{hcode(lnk)}"
+    
+    expiry_text = "Бессрочно ∞" if (d[0] - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(d[0]))
+    
+    text = f"👤 <b>Личный кабинет</b>\nТариф: {d[3]}\nДо: {expiry_text}\n\n🔗 <b>Ссылка:</b>\n{hcode(lnk)}"
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
 @router.callback_query(F.data == "about_menu")
 async def about_menu(callback: CallbackQuery):
-    text = (
-        "📖 <b>О сервисе TrubaVPN</b>\n\n"
-        "Мы предоставляем быстрый и анонимный доступ в интернет. "
-        "Для нас важна ваша безопасность и прозрачность отношений.\n\n"
-        "Ознакомьтесь с официальными документами сервиса по ссылкам ниже:"
-    )
+    text = "📖 <b>О сервисе TrubaVPN</b>\n\nОфициальные документы доступны по ссылкам ниже:"
     btns = [
         [InlineKeyboardButton(text="📜 Пользовательское соглашение", url="https://telegra.ph/Soglashenie-ob-ispolzovanii-materialov-i-servisov-internet-sajta-04-27")],
         [InlineKeyboardButton(text="🛡 Политика конфиденциальности", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-servisa-TrubaVPN-04-27")],
@@ -215,27 +196,62 @@ async def about_menu(callback: CallbackQuery):
 @router.callback_query(F.data == "ref_program")
 async def show_ref(callback: CallbackQuery):
     d = get_user_data(callback.from_user.id)
+    if d is None: d = (0, 0, "", "none", 0, 0)
+
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    text = f"🤝 <b>Рефералы</b>\nПригласи 5 друзей, которые купят подписку — получи ПОДПИСКУ НАВСЕГДА!!!!\n\nПриглашено: {d[5]}\nСсылка: {hcode(link)}"
+    ref_count = d[5]
+    
+    text = (
+        f"🤝 <b>Реферальная программа</b>\n\n"
+        f"Пригласи 5 друзей, которые купят любую подписку, и получи "
+        f"<b>БЕСКОНЕЧНУЮ подписку</b> на тариф Премиум!\n\n"
+        f"👥 Приглашено друзей: {ref_count} / 5\n"
+        f"🔗 Ваша ссылка:\n{hcode(link)}"
+    )
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
-# --- АДМИНКА ---
+# --- ОПЛАТА И АДМИНКА ---
+@router.callback_query(F.data.startswith("buy_"))
+async def process_buy(callback: CallbackQuery):
+    plan_map = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
+    plan_key = callback.data.replace("buy_", "")
+    plan_name = plan_map.get(plan_key, "Стандарт")
+    
+    prices = {"standart": 100, "standart_plus": 150, "premium": 300}
+    price = prices.get(plan_key, 100)
+    
+    url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa={price}&currency=RUB&o=ID_{callback.from_user.id}_{plan_key}"
+    m = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {price}₽", url=url)],
+        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{plan_key}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]
+    ])
+    await callback.message.edit_text(f"Вы выбрали тариф <b>{plan_name}</b>.", reply_markup=m, parse_mode="HTML")
+
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
+    plan_map = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
     d = callback.data.split("_")
-    plan = "_".join(d[2:])
-    m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"adm_ap_{d[1]}_{plan}")]])
+    # Обработка случая standart_plus (3 части в сплите)
+    plan_key = "_".join(d[2:])
+    plan_name = plan_map.get(plan_key, "Стандарт")
+    
+    m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"adm_ap_{d[1]}_{plan_key}")]])
     for a in ADMINS:
-        await bot.send_message(a, f"💰 Заявка на <b>{plan}</b> от @{callback.from_user.username}", reply_markup=m, parse_mode="HTML")
+        await bot.send_message(a, f"💰 Заявка на <b>{plan_name}</b> от @{callback.from_user.username}", reply_markup=m, parse_mode="HTML")
     await callback.answer("⏳ Ожидайте подтверждения администратором", show_alert=True)
 
 @router.callback_query(F.data.startswith("adm_ap_"))
 async def adm_ap(callback: CallbackQuery):
+    plan_map = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
     d = callback.data.split("_")
-    uid, plan = int(d[2]), "_".join(d[3:])
-    new_exp = await activate_user_in_db(uid, plan=plan)
-    await bot.send_message(uid, f"✅ Оплата принята! Тариф <b>{plan.capitalize()}</b> активирован.", parse_mode="HTML")
+    uid = int(d[2])
+    plan_key = "_".join(d[3:])
+    plan_name = plan_map.get(plan_key, "Стандарт")
+    
+    await activate_user_in_db(uid, plan=plan_name)
+    await bot.send_message(uid, f"✅ Оплата принята! Тариф <b>{plan_name}</b> активирован.", parse_mode="HTML")
     await callback.message.edit_text(f"✅ Готово для {uid}")
 
 async def main():
