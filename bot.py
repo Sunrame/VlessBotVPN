@@ -205,7 +205,7 @@ async def show_ref(callback: CallbackQuery):
     d = get_user_data(callback.from_user.id)
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    text = f"🤝 <b>Рефералы</b>\nПригласи 5 друзей — получи +30 дней!\n\nПриглашено: {d[5]}\nСсылка: {hcode(link)}"
+    text = f"🤝 <b>Рефералы</b>\nПригласи 5 друзей, которые купят подписку — получи +30 дней!\n\nПриглашено: {d[5]}\nСсылка: {hcode(link)}"
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
 # --- АДМИНКА ---
