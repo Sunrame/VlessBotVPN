@@ -81,13 +81,11 @@ async def activate_user_in_db(user_id, plan='shnir', active=1, months=3):
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ?, current_plan = ? WHERE user_id = ?', 
                    (active, expiry, plan, user_id))
     
-    # Реферальная логика: +1 друг и бонус за каждого 5-го
     if active == 1 and not already_active and ref_id:
         cursor.execute('UPDATE users SET bought_friends = bought_friends + 1 WHERE user_id = ?', (ref_id,))
         cursor.execute('SELECT bought_friends, expiry_date FROM users WHERE user_id = ?', (ref_id,))
         ref_data = cursor.fetchone()
         
-        # Если количество друзей кратно 5 (5, 10, 15...), даем +30 дней
         if ref_data and ref_data[0] > 0 and ref_data[0] % 5 == 0:
             bonus_time = 30 * 24 * 60 * 60
             new_ref_expiry = (ref_data[1] + bonus_time) if ref_data[1] > now else (now + bonus_time)
@@ -164,7 +162,22 @@ async def show_tariffs(callback: CallbackQuery):
         [InlineKeyboardButton(text="👑 Смотрящий (500₽ / 3 мес)", callback_data="buy_smotritel")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
     ])
-    await callback.message.edit_text("💎 <b>Тарифы на 90 дней:</b>", reply_markup=m, parse_mode="HTML")
+    text = (
+        "💎 <b>Доступные масти (подписка на 90 дней):</b>\n\n"
+        "🔹 <b>Шнырь — 150₽</b>\n"
+        "— Лимит трафика: 30 ГБ\n"
+        "— Кол-во устройств: 1\n"
+        "— Подходит для базового серфинга.\n\n"
+        "⭐ <b>Авторитет — 350₽</b>\n"
+        "— Лимит трафика: 100 ГБ\n"
+        "— Кол-во устройств: 3\n"
+        "— Оптимально для YouTube и соцсетей.\n\n"
+        "👑 <b>Смотрящий — 500₽</b>\n"
+        "— Лимит трафика: 500 ГБ\n"
+        "— Кол-во устройств: 10\n"
+        "— Максимальная скорость и жирный лимит."
+    )
+    await callback.message.edit_text(text, reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
@@ -173,7 +186,7 @@ async def process_buy(callback: CallbackQuery):
     price = prices.get(plan, 150)
     url = f"https://pay.freekassa.ru/?m={FK_SHOP_ID}&oa={price}&currency=RUB&o=ID_{callback.from_user.id}_{plan}"
     m = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"💳 Оплатить {price}₽", url=url)], [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{plan}")], [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]])
-    await callback.message.edit_text(f"Вы выбрали тариф <b>{plan.capitalize()}</b>.", reply_markup=m, parse_mode="HTML")
+    await callback.message.edit_text(f"Вы выбрали тариф <b>{plan.capitalize()}</b>.\nСрок действия: 90 дней.", reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
