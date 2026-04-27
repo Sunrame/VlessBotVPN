@@ -60,23 +60,35 @@ async def activate_user_in_db(user_id, plan='standart', active=1, months=1):
     cursor = conn.cursor()
     now = int(time.time())
     added_time = months * 30 * 24 * 60 * 60
+    
     cursor.execute('SELECT expiry_date, referrer_id, is_active FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
+    
     expiry = (row[0] + added_time) if row and row[0] > now else (now + added_time)
     ref_id = row[1] if row else None
     already_active = row[2] if row else 0
+    
     cursor.execute('UPDATE users SET is_active = ?, expiry_date = ?, current_plan = ? WHERE user_id = ?', (active, expiry, plan, user_id))
     
+    # ЛОГИКА ДЛЯ ПРИГЛАСИТЕЛЯ (РЕФЕРАЛА)
     if active == 1 and not already_active and ref_id:
         cursor.execute('UPDATE users SET bought_friends = bought_friends + 1 WHERE user_id = ?', (ref_id,))
         cursor.execute('SELECT bought_friends, expiry_date FROM users WHERE user_id = ?', (ref_id,))
         ref_data = cursor.fetchone()
-        if ref_data and ref_data[0] > 0 and ref_data[0] % 5 == 0:
-            bonus = 30 * 24 * 60 * 60
-            new_ref_expiry = (ref_data[1] + bonus) if ref_data[1] > now else (now + bonus)
-            cursor.execute('UPDATE users SET expiry_date = ?, is_active = 1 WHERE user_id = ?', (new_ref_expiry, ref_id))
-            try: await bot.send_message(ref_id, "🎁 Бонус за рефералов! +30 дней подписки начислено.")
-            except: pass
+        
+        if ref_data:
+            friends_count = ref_data[0]
+            # Если это ровно 5-й друг — даем бесконечность
+            if friends_count == 5:
+                forever_expiry = now + (100 * 365 * 24 * 60 * 60) # +100 лет
+                cursor.execute('UPDATE users SET expiry_date = ?, is_active = 1, current_plan = "Premium Plus" WHERE user_id = ?', (forever_expiry, ref_id))
+                try: await bot.send_message(ref_id, "🔥 ЛЕГЕНДА! Вы пригласили 5 друзей. Вам начислена БЕСКОНЕЧНАЯ подписка!")
+                except: pass
+            # Если друзей больше 5 (бонус за каждые следующие 5, если хочешь)
+            elif friends_count > 0 and friends_count % 5 == 0:
+                # Тут можно оставить стандартный бонус или ничего не делать
+                pass
+    
     conn.commit()
     conn.close()
     return expiry
