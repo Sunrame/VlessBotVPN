@@ -13,7 +13,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQu
 
 # --- КОНФИГУРАЦИЯ ---
 API_TOKEN = os.getenv('BOT_TOKEN')
-# ПРАВКА 1: Список из двух админов (ADMIN_ID_1 и ADMIN_ID_2)
 ADMINS = [int(os.getenv('ADMIN_ID_1', 0)), int(os.getenv('ADMIN_ID_2', 0))]
 
 LINKS = {
@@ -28,7 +27,7 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-SUPPORT_CONTACT = "@vvvvvpppnn"
+SUPPORT_CONTACT = "@RSConnectHelp_bot"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -97,6 +96,21 @@ def get_3xui_session():
         r = s.post(f"{PANEL_URL.strip('/')}/login", data={'username': LOGIN, 'password': PASSWORD}, timeout=10)
         return s if r.status_code == 200 else None
     except: return None
+
+# Дополнительная функция проверки наличия клиента в панели
+def check_client_in_panel(user_id):
+    session = get_3xui_session()
+    if not session: return None
+    try:
+        r = session.get(f"{PANEL_URL.strip('/')}/panel/api/inbounds/get/{INBOUND_ID}", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            settings = json.loads(data['obj']['settings'])
+            for client in settings['clients']:
+                if client['email'] == str(user_id):
+                    return client
+    except: pass
+    return None
 
 def get_vpn_link(user_id, expiry_ts, plan='Стандарт'):
     session = get_3xui_session()
@@ -170,19 +184,29 @@ async def show_tariffs(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
-    d = get_user_data(callback.from_user.id)
+    user_id = callback.from_user.id
+    d = get_user_data(user_id)
     if d is None: return await callback.answer("Нажмите /start", show_alert=True)
         
     now = int(time.time())
-    if d[1] == 0 or d[0] < now:
+    
+    # ПРАВКА: Дополнительная проверка через API панели
+    panel_client = await asyncio.get_event_loop().run_in_executor(None, check_client_in_panel, user_id)
+    
+    # Если подписки нет ни в базе, ни в панели (или она истекла в базе)
+    if (d[1] == 0 or d[0] < now) and not panel_client:
         return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", reply_markup=back_btn(), parse_mode="HTML")
     
     await callback.answer("🔄 Загрузка ключа...")
-    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, callback.from_user.id, d[0], d[3])
     
-    expiry_text = "Бессрочно ∞" if (d[0] - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(d[0]))
+    # Определяем параметры (берем из базы, если там пусто — из панели)
+    expiry_date = d[0] if d[0] > now else (panel_client['expiryTime'] // 1000 if panel_client else now)
+    plan_name = d[3] if d[3] != 'none' else "Активен"
     
-    text = f"👤 <b>Личный кабинет</b>\nТариф: {d[3]}\nДо: {expiry_text}\n\n🔗 <b>Ссылка:</b>\n{hcode(lnk)}"
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, expiry_date, plan_name)
+    expiry_text = "Бессрочно ∞" if (expiry_date - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(expiry_date))
+    
+    text = f"👤 <b>Личный кабинет</b>\nТариф: {plan_name}\nДо: {expiry_text}\n\n🔗 <b>Ваша ссылка (вставьте в HAPP):</b>\n{hcode(lnk)}"
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
 @router.callback_query(F.data == "about_menu")
@@ -225,7 +249,8 @@ async def process_buy(callback: CallbackQuery):
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{plan_key}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]
     ])
-    await callback.message.edit_text(f"Вы выбрали тариф <b>{plan_name}</b>.\n\nОплатите товар, затем нажмите кнопку ниже для уведомления администратора.", reply_markup=m, parse_mode="HTML")
+    # ПРАВКА: Добавлено упоминание приложения HAPP
+    await callback.message.edit_text(f"Вы выбрали тариф <b>{plan_name}</b>.\n\nОплатите товар, затем нажмите кнопку ниже. Полученную ссылку нужно будет вставить в приложение <b>HAPP</b>.", reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
@@ -253,12 +278,12 @@ async def adm_ap(callback: CallbackQuery):
     plan_key = "_".join(d[3:])
     plan_name = plan_map.get(plan_key, "Стандарт")
     
-    # ПРАВКА 2: После нажатия кнопки активации бот сразу генерирует и присылает ключ юзеру
     expiry_ts = await activate_user_in_db(uid, plan=plan_name)
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, expiry_ts, plan_name)
     
     try:
-        await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nВаш тариф <b>{plan_name}</b> активирован.\n🔗 <b>Ваш ключ:</b>\n{hcode(lnk)}", parse_mode="HTML")
+        # ПРАВКА: Упоминание HAPP в сообщении активации
+        await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nВаш тариф <b>{plan_name}</b> активирован.\n🔗 <b>Ваш ключ (вставьте в HAPP):</b>\n{hcode(lnk)}", parse_mode="HTML")
     except: pass
     await callback.message.edit_text(f"✅ Активировано и ключ выдан для {uid} ({plan_name})")
 
