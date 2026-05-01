@@ -38,6 +38,7 @@ router = Router()
 def init_db():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
+    # Добавлено поле last_notified
     cursor.execute('''CREATE TABLE IF NOT EXISTS users 
                       (user_id INTEGER PRIMARY KEY, 
                        username TEXT,
@@ -45,11 +46,10 @@ def init_db():
                        bought_friends INTEGER DEFAULT 0, 
                        expiry_date INTEGER DEFAULT 0,
                        is_active INTEGER DEFAULT 0,
-                       current_plan TEXT DEFAULT 'none')''')
+                       current_plan TEXT DEFAULT 'none',
+                       last_notified INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
-
-init_db()
 
 def get_user_data(user_id):
     conn = sqlite3.connect('users.db')
@@ -97,7 +97,6 @@ def get_3xui_session():
         return s if r.status_code == 200 else None
     except: return None
 
-# Дополнительная функция проверки наличия клиента в панели
 def check_client_in_panel(user_id):
     session = get_3xui_session()
     if not session: return None
@@ -130,6 +129,40 @@ def get_vpn_link(user_id, expiry_ts, plan='Стандарт'):
         host = PANEL_URL.split('://')[-1].split(':')[0]
         return f"{PANEL_URL.split('://')[0]}://{host}:{SUB_PORT}/sub/{u_uuid}?remark=Truba_{plan.replace(' ', '_')}"
     except: return "Ошибка VPN"
+
+# --- ФОНОВЫЕ ЗАДАЧИ ---
+async def check_expiry_notifications():
+    """Проверка истечения подписки за 24 часа"""
+    while True:
+        try:
+            conn = sqlite3.connect('users.db')
+            cursor = conn.cursor()
+            now = int(time.time())
+            one_day_later = now + (24 * 60 * 60)
+            
+            # Ищем активных пользователей, у которых осталось менее суток
+            cursor.execute('''SELECT user_id FROM users 
+                              WHERE is_active = 1 
+                              AND expiry_date > ? 
+                              AND expiry_date <= ? 
+                              AND last_notified < ?''', (now, one_day_later, now - 86400))
+            
+            users_to_notify = cursor.fetchall()
+            for user in users_to_notify:
+                try:
+                    await bot.send_message(
+                        user[0], 
+                        "⚠️ <b>Внимание!</b>\nОплатите подписку чтобы оставаться на связи, у вас остался один день.",
+                        parse_mode="HTML"
+                    )
+                    cursor.execute('UPDATE users SET last_notified = ? WHERE user_id = ?', (now, user[0]))
+                    conn.commit()
+                except: pass
+            conn.close()
+        except Exception as e:
+            logging.error(f"Ошибка в системе уведомлений: {e}")
+            
+        await asyncio.sleep(3600) # Проверка раз в час
 
 # --- КЛАВИАТУРЫ ---
 def main_panel():
@@ -187,19 +220,13 @@ async def show_profile(callback: CallbackQuery):
     user_id = callback.from_user.id
     d = get_user_data(user_id)
     if d is None: return await callback.answer("Нажмите /start", show_alert=True)
-        
     now = int(time.time())
-    
-    # ПРАВКА: Дополнительная проверка через API панели
     panel_client = await asyncio.get_event_loop().run_in_executor(None, check_client_in_panel, user_id)
     
-    # Если подписки нет ни в базе, ни в панели (или она истекла в базе)
     if (d[1] == 0 or d[0] < now) and not panel_client:
         return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", reply_markup=back_btn(), parse_mode="HTML")
     
     await callback.answer("🔄 Загрузка ключа...")
-    
-    # Определяем параметры (берем из базы, если там пусто — из панели)
     expiry_date = d[0] if d[0] > now else (panel_client['expiryTime'] // 1000 if panel_client else now)
     plan_name = d[3] if d[3] != 'none' else "Активен"
     
@@ -211,6 +238,7 @@ async def show_profile(callback: CallbackQuery):
 
 @router.callback_query(F.data == "about_menu")
 async def about_menu(callback: CallbackQuery):
+    # Telegraph автоматически открывается внутри ТГ через Instant View
     text = "📖 <b>О сервисе TrubaVPN</b>\n\nОфициальные документы доступны по ссылкам ниже:"
     btns = [
         [InlineKeyboardButton(text="📜 Пользовательское соглашение", url="https://telegra.ph/Soglashenie-ob-ispolzovanii-materialov-i-servisov-internet-sajta-04-27")],
@@ -236,7 +264,6 @@ async def show_ref(callback: CallbackQuery):
     )
     await callback.message.edit_text(text, reply_markup=back_btn(), parse_mode="HTML")
 
-# --- ОПЛАТА ЧЕРЕЗ LAVA.TOP И АДМИНКА ---
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
     plan_map = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
@@ -249,7 +276,6 @@ async def process_buy(callback: CallbackQuery):
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{plan_key}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]
     ])
-    # ПРАВКА: Добавлено упоминание приложения HAPP
     await callback.message.edit_text(f"Вы выбрали тариф <b>{plan_name}</b>.\n\nОплатите товар, затем нажмите кнопку ниже. Полученную ссылку нужно будет вставить в приложение <b>HAPP</b>.", reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("paid_"))
@@ -282,7 +308,6 @@ async def adm_ap(callback: CallbackQuery):
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, expiry_ts, plan_name)
     
     try:
-        # ПРАВКА: Упоминание HAPP в сообщении активации
         await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nВаш тариф <b>{plan_name}</b> активирован.\n🔗 <b>Ваш ключ (вставьте в HAPP):</b>\n{hcode(lnk)}", parse_mode="HTML")
     except: pass
     await callback.message.edit_text(f"✅ Активировано и ключ выдан для {uid} ({plan_name})")
@@ -295,8 +320,16 @@ async def adm_dec(callback: CallbackQuery):
     await callback.message.edit_text(f"❌ Заявка отклонена для {uid}")
 
 async def main():
+    init_db() # Инициализация БД
     dp.include_router(router)
+    
+    # Запуск фоновой проверки уведомлений
+    asyncio.create_task(check_expiry_notifications())
+    
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.error("Бот остановлен")
