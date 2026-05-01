@@ -134,7 +134,6 @@ def get_vpn_link(user_id, expiry_ts, plan='Стандарт'):
         'Стандарт +': {'gb': 0, 'ips': 1}, 
         'Премиум': {'gb': 0, 'ips': 3}
     }
-    # Очистка имени плана для поиска лимитов
     clean_plan = plan.split(' (')[0]
     config = limits.get(clean_plan, limits['Стандарт'])
     u_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"truba_v2_{user_id}"))
@@ -209,39 +208,59 @@ async def show_tariffs(callback: CallbackQuery):
 async def choose_duration(callback: CallbackQuery):
     t_type = callback.data.replace("type_", "")
     
-    # Расчетные данные для текстов
+    # Расчетные данные для текстов и описания
     data = {
-        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "m": [100, 90, 80, 70]},
-        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "m": [150, 135, 120, 105]},
-        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "m": [300, 270, 240, 210]}
+        "standart": {
+            "name": "Стандарт", 
+            "p": [100, 270, 480, 840], 
+            "m": [100, 90, 80, 70],
+            "desc": "— Трафик: <b>50 ГБ</b>\n— Устройств: <b>1</b>\n— Локации: NL, DE"
+        },
+        "standart_plus": {
+            "name": "Стандарт +", 
+            "p": [150, 405, 720, 1260], 
+            "m": [150, 135, 120, 105],
+            "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>1</b>\n— Локации: NL, DE, KZ"
+        },
+        "premium": {
+            "name": "Премиум", 
+            "p": [300, 810, 1440, 2520], 
+            "m": [300, 270, 240, 210],
+            "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>до 3-х</b>\n— Приоритетная поддержка"
+        }
     }
     
     info = data[t_type]
-    text = f"⏳ <b>Выберите срок подписки для тарифа {info['name']}:</b>\n\nЧем дольше срок, тем дешевле месяц!"
+    text = (
+        f"💳 <b>Тариф: {info['name']}</b>\n\n"
+        f"{info['desc']}\n\n"
+        f"—————\n"
+        f"⏳ <b>Выберите срок подписки:</b>\n"
+        f"<i>Чем дольше срок, тем больше выгода!</i>\n\n"
+        f"🤝 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи тариф <b>БЕСПЛАТНО НАВСЕГДА!</b>"
+    )
     
     btns = [
         [InlineKeyboardButton(text=f"1 месяц — {info['p'][0]}₽", callback_data=f"buy_{t_type}_1")],
         [InlineKeyboardButton(text=f"3 месяца — {info['p'][1]}₽ ({info['m'][1]}₽/мес)", callback_data=f"buy_{t_type}_3")],
         [InlineKeyboardButton(text=f"6 месяцев — {info['p'][2]}₽ ({info['m'][2]}₽/мес)", callback_data=f"buy_{t_type}_6")],
         [InlineKeyboardButton(text=f"12 месяцев — {info['p'][3]}₽ ({info['m'][3]}₽/мес)", callback_data=f"buy_{t_type}_12")],
-        [InlineKeyboardButton(text="⬅️ К тарифам", callback_data="tariffs")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]
     ]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
     parts = callback.data.split("_")
-    # Обработка standart_plus (3 части) и остальных (2 части)
-    if len(parts) == 4: # buy_standart_plus_12
+    if len(parts) == 4:
         t_type = f"{parts[1]}_{parts[2]}"
         months = parts[3]
-    else: # buy_standart_12
+    else:
         t_type = parts[1]
         months = parts[2]
         
     plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
     plan_display = f"{plan_names[t_type]} ({months} мес.)"
-    
     url = LINKS[t_type][months]
     
     m = InlineKeyboardMarkup(inline_keyboard=[
@@ -253,7 +272,7 @@ async def process_buy(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
-    d = callback.data.split("_") # paid, uid, type, (maybe plus), months
+    d = callback.data.split("_")
     uid = d[1]
     months = d[-1]
     t_type = "_".join(d[2:-1])
@@ -273,7 +292,7 @@ async def user_paid(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_ap_"))
 async def adm_ap(callback: CallbackQuery):
-    d = callback.data.split("_") # adm, ap, uid, type, (plus), months
+    d = callback.data.split("_")
     uid = int(d[2])
     months = d[-1]
     t_type = "_".join(d[3:-1])
@@ -288,7 +307,6 @@ async def adm_ap(callback: CallbackQuery):
     except: pass
     await callback.message.edit_text(f"✅ Выдано для {uid} ({p_full_name})")
 
-# Остальные функции (profile, ref_program, about_menu) остаются без изменений, как в предыдущем коде
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     user_id = callback.from_user.id
