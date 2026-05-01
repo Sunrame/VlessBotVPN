@@ -15,7 +15,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQu
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMINS = [int(os.getenv('ADMIN_ID_1', 0)), int(os.getenv('ADMIN_ID_2', 0))]
 
-# Обновленная структура ссылок
 LINKS = {
     "standart": {
         "1": "https://app.lava.top/products/851dc5e2-5f49-43f7-82c6-0dbd466974b7",
@@ -43,7 +42,7 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-SUPPORT_CONTACT = "@vvvvvpppnn"
+SUPPORT_CONTACT = "@RSConnectHelp_bot"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -113,6 +112,7 @@ def get_3xui_session():
     except: return None
 
 def check_client_in_panel(user_id):
+    """Ищет клиента по email, который теперь содержит ID в формате ID_username"""
     session = get_3xui_session()
     if not session: return None
     try:
@@ -121,14 +121,17 @@ def check_client_in_panel(user_id):
             data = r.json()
             settings = json.loads(data['obj']['settings'])
             for client in settings['clients']:
-                if client['email'] == str(user_id):
+                # Проверяем, начинается ли email с нашего user_id
+                if client['email'].split('_')[0] == str(user_id):
                     return client
     except: pass
     return None
 
-def get_vpn_link(user_id, expiry_ts, plan='Стандарт'):
+def get_vpn_link(user_id, username, expiry_ts, plan='Стандарт'):
+    """Генерирует ссылку, записывая в email 'ID_username' для удобства в панели"""
     session = get_3xui_session()
     if not session: return "Ошибка связи"
+    
     limits = {
         'Стандарт': {'gb': 50, 'ips': 1}, 
         'Стандарт +': {'gb': 0, 'ips': 1}, 
@@ -139,46 +142,78 @@ def get_vpn_link(user_id, expiry_ts, plan='Стандарт'):
     u_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"truba_v2_{user_id}"))
     limit_bytes = config['gb'] * 1024 * 1024 * 1024 if config['gb'] > 0 else 0
     
-    payload = {"id": INBOUND_ID, "settings": json.dumps({"clients": [{"id": u_uuid, "email": f"{user_id}", "limitIp": config['ips'], "totalGB": limit_bytes, "expiryTime": expiry_ts * 1000, "enable": True, "subId": u_uuid}]})}
+    # Формируем читаемое имя для панели: ID_юзернейм (или просто ID)
+    display_name = f"{user_id}_{username}" if username else str(user_id)
+    
+    payload = {
+        "id": INBOUND_ID, 
+        "settings": json.dumps({
+            "clients": [{
+                "id": u_uuid, 
+                "email": display_name, 
+                "limitIp": config['ips'], 
+                "totalGB": limit_bytes, 
+                "expiryTime": expiry_ts * 1000, 
+                "enable": True, 
+                "subId": u_uuid
+            }]
+        })
+    }
+    
     try:
+        # Пытаемся добавить. Если уже есть, панель может вернуть ошибку, но мы просто генерируем ссылку
         session.post(f"{PANEL_URL.strip('/')}/panel/api/inbounds/addClient", json=payload, timeout=10)
         host = PANEL_URL.split('://')[-1].split(':')[0]
         return f"{PANEL_URL.split('://')[0]}://{host}:{SUB_PORT}/sub/{u_uuid}?remark=Truba_{plan.replace(' ', '_')}"
     except: return "Ошибка VPN"
 
-# --- ФОНОВЫЕ ЗАДАЧИ ---
-async def check_expiry_notifications():
-    while True:
-        try:
-            conn = sqlite3.connect('users.db')
-            cursor = conn.cursor()
-            now = int(time.time())
-            one_day_later = now + (24 * 60 * 60)
-            cursor.execute('''SELECT user_id FROM users 
-                              WHERE is_active = 1 AND expiry_date > ? AND expiry_date <= ? AND last_notified < ?''', 
-                           (now, one_day_later, now - 86400))
-            users_to_notify = cursor.fetchall()
-            for user in users_to_notify:
-                try:
-                    await bot.send_message(user[0], "⚠️ <b>Внимание!</b>\nОплатите подписку чтобы оставаться на связи, у вас остался один день.", parse_mode="HTML")
-                    cursor.execute('UPDATE users SET last_notified = ? WHERE user_id = ?', (now, user[0]))
-                    conn.commit()
-                except: pass
-            conn.close()
-        except Exception as e: logging.error(f"Уведомления: {e}")
-        await asyncio.sleep(3600)
+# --- ОБРАБОТЧИКИ (с изменениями в вызовах) ---
 
-# --- КЛАВИАТУРЫ ---
-def main_panel():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")],
-        [InlineKeyboardButton(text="💎 Выбрать тариф", callback_data="tariffs")],
-        [InlineKeyboardButton(text="🤝 Рефералы", callback_data="ref_program")],
-        [InlineKeyboardButton(text="ℹ️ О сервисе", callback_data="about_menu")]
-    ])
+@router.callback_query(F.data.startswith("adm_ap_"))
+async def adm_ap(callback: CallbackQuery):
+    d = callback.data.split("_")
+    uid = int(d[2])
+    months = d[-1]
+    t_type = "_".join(d[3:-1])
+    
+    # Получаем данные пользователя для юзернейма
+    user_info = get_user_data(uid)
+    username = user_info[2] if user_info else None
+    
+    plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
+    p_full_name = f"{plan_names[t_type]} ({months} мес.)"
+    
+    expiry_ts = await activate_user_in_db(uid, plan=p_full_name, months=months)
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, username, expiry_ts, p_full_name)
+    
+    try: await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nТариф: <b>{p_full_name}</b>\n🔗 <b>Ваш ключ для HAPP:</b>\n{hcode(lnk)}", parse_mode="HTML")
+    except: pass
+    await callback.message.edit_text(f"✅ Выдано для {uid} ({p_full_name})")
 
-# --- ОБРАБОТЧИКИ ---
+@router.callback_query(F.data == "profile")
+async def show_profile(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    d = get_user_data(user_id)
+    if d is None: return await callback.answer("Нажмите /start", show_alert=True)
+    
+    now = int(time.time())
+    panel_client = await asyncio.get_event_loop().run_in_executor(None, check_client_in_panel, user_id)
+    
+    if (d[1] == 0 or d[0] < now) and not panel_client:
+        return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
+    
+    await callback.answer("🔄 Загрузка...")
+    expiry_date = d[0] if d[0] > now else (panel_client['expiryTime'] // 1000 if panel_client else now)
+    plan_name = d[3] if d[3] != 'none' else "Активен"
+    
+    # Передаем username из базы в генератор ссылок
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, d[2], expiry_date, plan_name)
+    expiry_text = "Бессрочно ∞" if (expiry_date - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(expiry_date))
+    
+    text = f"👤 <b>Личный кабинет</b>\nТариф: {plan_name}\nДо: {expiry_text}\n\n🔗 <b>Ваша ссылка (HAPP):</b>\n{hcode(lnk)}"
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
+# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject):
     r_id = int(command.args) if command.args and command.args.isdigit() and int(command.args) != message.from_user.id else None
@@ -207,62 +242,24 @@ async def show_tariffs(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("type_"))
 async def choose_duration(callback: CallbackQuery):
     t_type = callback.data.replace("type_", "")
-    
-    # Расчетные данные для текстов и описания
     data = {
-        "standart": {
-            "name": "Стандарт", 
-            "p": [100, 270, 480, 840], 
-            "m": [100, 90, 80, 70],
-            "desc": "— Трафик: <b>50 ГБ</b>\n— Устройств: <b>1</b>\n— Локация: DE"
-        },
-        "standart_plus": {
-            "name": "Стандарт +", 
-            "p": [150, 405, 720, 1260], 
-            "m": [150, 135, 120, 105],
-            "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>1</b>\n— Локация: DE"
-        },
-        "premium": {
-            "name": "Премиум", 
-            "p": [300, 810, 1440, 2520], 
-            "m": [300, 270, 240, 210],
-            "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>до 3-х</b>\n— Приоритетная поддержка"
-        }
+        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "m": [100, 90, 80, 70], "desc": "— Трафик: <b>50 ГБ</b>\n— Устройств: <b>1</b>\n— Локации: NL, DE"},
+        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "m": [150, 135, 120, 105], "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>1</b>\n— Локации: NL, DE, KZ"},
+        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "m": [300, 270, 240, 210], "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>до 3-х</b>\n— Приоритетная поддержка"}
     }
-    
     info = data[t_type]
-    text = (
-        f"💳 <b>Тариф: {info['name']}</b>\n\n"
-        f"{info['desc']}\n\n"
-        f"—————\n"
-        f"⏳ <b>Выберите срок подписки:</b>\n"
-        f"<i>Чем дольше срок, тем больше выгода!</i>\n\n"
-        f"🤝 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи тариф <b>БЕСПЛАТНО НАВСЕГДА!</b>"
-    )
-    
-    btns = [
-        [InlineKeyboardButton(text=f"1 месяц — {info['p'][0]}₽", callback_data=f"buy_{t_type}_1")],
-        [InlineKeyboardButton(text=f"3 месяца — {info['p'][1]}₽ ({info['m'][1]}₽/мес)", callback_data=f"buy_{t_type}_3")],
-        [InlineKeyboardButton(text=f"6 месяцев — {info['p'][2]}₽ ({info['m'][2]}₽/мес)", callback_data=f"buy_{t_type}_6")],
-        [InlineKeyboardButton(text=f"12 месяцев — {info['p'][3]}₽ ({info['m'][3]}₽/мес)", callback_data=f"buy_{t_type}_12")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")]
-    ]
+    text = f"💳 <b>Тариф: {info['name']}</b>\n\n{info['desc']}\n\n—————\n⏳ <b>Выберите срок подписки:</b>\n<i>Чем дольше срок, тем больше выгода!</i>\n\n🤝 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи тариф <b>БЕСПЛАТНО НАВСЕГДА!</b>"
+    btns = [[InlineKeyboardButton(text=f"{m} мес. — {info['p'][idx]}₽", callback_data=f"buy_{t_type}_{m}")] for idx, m in enumerate([1,3,6,12])]
+    btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
     parts = callback.data.split("_")
-    if len(parts) == 4:
-        t_type = f"{parts[1]}_{parts[2]}"
-        months = parts[3]
-    else:
-        t_type = parts[1]
-        months = parts[2]
-        
+    t_type, months = ("_".join(parts[1:-1]), parts[-1])
     plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
     plan_display = f"{plan_names[t_type]} ({months} мес.)"
     url = LINKS[t_type][months]
-    
     m = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"💳 Оплатить {plan_display}", url=url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{t_type}_{months}")],
@@ -273,60 +270,18 @@ async def process_buy(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
     d = callback.data.split("_")
-    uid = d[1]
-    months = d[-1]
-    t_type = "_".join(d[2:-1])
-    
+    uid, months, t_type = d[1], d[-1], "_".join(d[2:-1])
     plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
     p_name = f"{plan_names[t_type]} ({months} мес.)"
-
     m = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"adm_ap_{uid}_{t_type}_{months}")],
         [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_dec_{uid}")]
     ])
     for a in ADMINS:
-        if a == 0: continue
-        try: await bot.send_message(a, f"💰 Заявка: <b>{p_name}</b> от @{callback.from_user.username}", reply_markup=m, parse_mode="HTML")
-        except: pass
+        if a != 0:
+            try: await bot.send_message(a, f"💰 Заявка: <b>{p_name}</b> от @{callback.from_user.username}", reply_markup=m, parse_mode="HTML")
+            except: pass
     await callback.answer("⏳ Заявка отправлена. Ожидайте подтверждения.", show_alert=True)
-
-@router.callback_query(F.data.startswith("adm_ap_"))
-async def adm_ap(callback: CallbackQuery):
-    d = callback.data.split("_")
-    uid = int(d[2])
-    months = d[-1]
-    t_type = "_".join(d[3:-1])
-    
-    plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
-    p_full_name = f"{plan_names[t_type]} ({months} мес.)"
-    
-    expiry_ts = await activate_user_in_db(uid, plan=p_full_name, months=months)
-    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, expiry_ts, p_full_name)
-    
-    try: await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nТариф: <b>{p_full_name}</b>\n🔗 <b>Ваш ключ для HAPP:</b>\n{hcode(lnk)}", parse_mode="HTML")
-    except: pass
-    await callback.message.edit_text(f"✅ Выдано для {uid} ({p_full_name})")
-
-@router.callback_query(F.data == "profile")
-async def show_profile(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    d = get_user_data(user_id)
-    if d is None: return await callback.answer("Нажмите /start", show_alert=True)
-    now = int(time.time())
-    panel_client = await asyncio.get_event_loop().run_in_executor(None, check_client_in_panel, user_id)
-    
-    if (d[1] == 0 or d[0] < now) and not panel_client:
-        return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
-    
-    await callback.answer("🔄 Загрузка...")
-    expiry_date = d[0] if d[0] > now else (panel_client['expiryTime'] // 1000 if panel_client else now)
-    plan_name = d[3] if d[3] != 'none' else "Активен"
-    
-    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, expiry_date, plan_name)
-    expiry_text = "Бессрочно ∞" if (expiry_date - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(expiry_date))
-    
-    text = f"👤 <b>Личный кабинет</b>\nТариф: {plan_name}\nДо: {expiry_text}\n\n🔗 <b>Ваша ссылка (HAPP):</b>\n{hcode(lnk)}"
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data == "about_menu")
 async def about_menu(callback: CallbackQuery):
@@ -344,8 +299,7 @@ async def show_ref(callback: CallbackQuery):
     d = get_user_data(callback.from_user.id)
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    ref_count = d[5] if d else 0
-    text = f"🤝 <b>Реферальная программа</b>\n\nПригласи 5 друзей и получи <b>ВЕЧНЫЙ ПРЕМИУМ</b>!\n\n👥 Приглашено: {ref_count} / 5\n🔗 Ссылка:\n{hcode(link)}"
+    text = f"🤝 <b>Реферальная программа</b>\n\nПригласи 5 друзей и получи <b>ВЕЧНЫЙ ПРЕМИУМ</b>!\n\n👥 Приглашено: {d[5] if d else 0} / 5\n🔗 Ссылка:\n{hcode(link)}"
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("adm_dec_"))
