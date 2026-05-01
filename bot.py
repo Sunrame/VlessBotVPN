@@ -43,7 +43,7 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-SUPPORT_CONTACT = "@RSConnectHelp_bot"
+SUPPORT_CONTACT = "@vvvvvpppnn"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
