@@ -42,12 +42,21 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-SUPPORT_CONTACT = "@RSConnectHelp_bot"
+SUPPORT_CONTACT = "@vvvvvpppnn"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 router = Router()
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def main_panel():
+    btns = [
+        [InlineKeyboardButton(text="💎 Тарифы", callback_data="tariffs"), InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🤝 Реф. программа", callback_data="ref_program")],
+        [InlineKeyboardButton(text="📖 О сервисе", callback_data="about_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=btns)
 
 # --- БАЗЫ ДАННЫХ ---
 def init_db():
@@ -112,7 +121,6 @@ def get_3xui_session():
     except: return None
 
 def check_client_in_panel(user_id):
-    """Ищет клиента по email, который теперь содержит ID в формате ID_username"""
     session = get_3xui_session()
     if not session: return None
     try:
@@ -121,14 +129,12 @@ def check_client_in_panel(user_id):
             data = r.json()
             settings = json.loads(data['obj']['settings'])
             for client in settings['clients']:
-                # Проверяем, начинается ли email с нашего user_id
                 if client['email'].split('_')[0] == str(user_id):
                     return client
     except: pass
     return None
 
 def get_vpn_link(user_id, username, expiry_ts, plan='Стандарт'):
-    """Генерирует ссылку, записывая в email 'ID_username' для удобства в панели"""
     session = get_3xui_session()
     if not session: return "Ошибка связи"
     
@@ -142,7 +148,6 @@ def get_vpn_link(user_id, username, expiry_ts, plan='Стандарт'):
     u_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"truba_v2_{user_id}"))
     limit_bytes = config['gb'] * 1024 * 1024 * 1024 if config['gb'] > 0 else 0
     
-    # Формируем читаемое имя для панели: ID_юзернейм (или просто ID)
     display_name = f"{user_id}_{username}" if username else str(user_id)
     
     payload = {
@@ -161,13 +166,58 @@ def get_vpn_link(user_id, username, expiry_ts, plan='Стандарт'):
     }
     
     try:
-        # Пытаемся добавить. Если уже есть, панель может вернуть ошибку, но мы просто генерируем ссылку
         session.post(f"{PANEL_URL.strip('/')}/panel/api/inbounds/addClient", json=payload, timeout=10)
         host = PANEL_URL.split('://')[-1].split(':')[0]
         return f"{PANEL_URL.split('://')[0]}://{host}:{SUB_PORT}/sub/{u_uuid}?remark=Truba_{plan.replace(' ', '_')}"
     except: return "Ошибка VPN"
 
-# --- ОБРАБОТЧИКИ (с изменениями в вызовах) ---
+# --- ОБРАБОТЧИКИ ---
+
+@router.message(Command("check"))
+async def cmd_check_user(message: types.Message, command: CommandObject):
+    if message.from_user.id not in ADMINS:
+        return
+    if not command.args:
+        return await message.answer("⚠️ Введите ID: <code>/check 12345</code>", parse_mode="HTML")
+    
+    target_id = command.args
+    if not target_id.isdigit():
+        return await message.answer("❌ ID должен состоять только из цифр.")
+    
+    target_id = int(target_id)
+    user_data = get_user_data(target_id)
+    
+    db_username = "Не найден"
+    plan_info = "Отсутствует"
+    expiry_text = "-"
+    
+    if user_data:
+        db_username = f"@{user_data[2]}" if user_data[2] else "Не установлен"
+        plan_info = user_data[3] if user_data[3] != 'none' else "Нет"
+        now = int(time.time())
+        if user_data[0] > now:
+            if (user_data[0] - now) > (10 * 365 * 24 * 60 * 60):
+                expiry_text = "Бессрочно ∞"
+            else:
+                expiry_text = time.strftime('%d.%m.%Y', time.localtime(user_data[0]))
+        else:
+            expiry_text = "Истекла"
+
+    try:
+        chat = await bot.get_chat(target_id)
+        current_username = f"@{chat.username}" if chat.username else "Скрыт/Нет"
+    except:
+        current_username = db_username
+
+    text = (
+        f"🔍 <b>Информация о пользователе:</b>\n\n"
+        f"🆔 ID: <code>{target_id}</code>\n"
+        f"👤 Юзернейм (сейчас): {current_username}\n"
+        f"📖 Юзернейм (в БД): {db_username}\n"
+        f"💎 Тариф: <b>{plan_info}</b>\n"
+        f"📅 Срок до: <b>{expiry_text}</b>"
+    )
+    await message.answer(text, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("adm_ap_"))
 async def adm_ap(callback: CallbackQuery):
@@ -176,7 +226,6 @@ async def adm_ap(callback: CallbackQuery):
     months = d[-1]
     t_type = "_".join(d[3:-1])
     
-    # Получаем данные пользователя для юзернейма
     user_info = get_user_data(uid)
     username = user_info[2] if user_info else None
     
@@ -206,14 +255,12 @@ async def show_profile(callback: CallbackQuery):
     expiry_date = d[0] if d[0] > now else (panel_client['expiryTime'] // 1000 if panel_client else now)
     plan_name = d[3] if d[3] != 'none' else "Активен"
     
-    # Передаем username из базы в генератор ссылок
     lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, d[2], expiry_date, plan_name)
     expiry_text = "Бессрочно ∞" if (expiry_date - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(expiry_date))
     
     text = f"👤 <b>Личный кабинет</b>\nТариф: {plan_name}\nДо: {expiry_text}\n\n🔗 <b>Ваша ссылка (HAPP):</b>\n{hcode(lnk)}"
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
-# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject):
     r_id = int(command.args) if command.args and command.args.isdigit() and int(command.args) != message.from_user.id else None
@@ -312,7 +359,7 @@ async def adm_dec(callback: CallbackQuery):
 async def main():
     init_db()
     dp.include_router(router)
-    asyncio.create_task(check_expiry_notifications())
+    # asyncio.create_task(check_expiry_notifications()) # Раскомментируй, если функция определена
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
