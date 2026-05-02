@@ -6,7 +6,7 @@ import time
 import sqlite3
 import asyncio
 import json
-from aiogram import Bot, Dispatcher, types, Router, F
+from aiogram import Bot, Dispatcher, types, Router, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.utils.markdown import hcode, hbold
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -42,14 +42,57 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-SUPPORT_CONTACT = "@vvvvvpppnn"
+SUPPORT_CONTACT = "@RSConnectHelp_bot"
+CHANNEL_ID = "@Truba_VPN" # Твой канал
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 router = Router()
 
+# Хранилище для лимитов нажатий: {user_id: [timestamps]}
+payment_attempts = {}
+
+# --- MIDDLEWARE ---
+class JoinCheckMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user_id = event.from_user.id
+        if user_id in ADMINS:
+            return await handler(event, data)
+
+        try:
+            member = await data['bot'].get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+            if member.status in ["left", "kicked"]:
+                raise Exception()
+        except Exception:
+            text = f"❌ <b>Доступ ограничен!</b>\n\nДля использования бота необходимо подписаться на наш канал: {CHANNEL_ID}"
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Подписаться на канал", url="https://t.me/Truba_VPN")],
+                [InlineKeyboardButton(text="🔄 Я подписался", callback_data="to_main")]
+            ])
+            if isinstance(event, types.Message):
+                await event.answer(text, reply_markup=markup, parse_mode="HTML")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Сначала подпишитесь на канал!", show_alert=True)
+                await event.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+            return
+        return await handler(event, data)
+
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def check_payment_limit(user_id):
+    now = time.time()
+    if user_id not in payment_attempts:
+        payment_attempts[user_id] = []
+    
+    # Удаляем записи старше 1 часа
+    payment_attempts[user_id] = [t for t in payment_attempts[user_id] if now - t < 3600]
+    
+    if len(payment_attempts[user_id]) >= 3:
+        return int(3600 - (now - payment_attempts[user_id][0]))
+    
+    payment_attempts[user_id].append(now)
+    return 0
+
 def main_panel():
     btns = [
         [InlineKeyboardButton(text="💎 Тарифы", callback_data="tariffs"), InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
@@ -175,90 +218,61 @@ def get_vpn_link(user_id, username, expiry_ts, plan='Стандарт'):
 
 @router.message(Command("check"))
 async def cmd_check_user(message: types.Message, command: CommandObject):
-    if message.from_user.id not in ADMINS:
-        return
-    if not command.args:
-        return await message.answer("⚠️ Введите ID: <code>/check 12345</code>", parse_mode="HTML")
+    if message.from_user.id not in ADMINS: return
+    if not command.args: return await message.answer("⚠️ Введите ID: <code>/check 12345</code>", parse_mode="HTML")
     
-    target_id = command.args
-    if not target_id.isdigit():
-        return await message.answer("❌ ID должен состоять только из цифр.")
-    
-    target_id = int(target_id)
+    target_id = int(command.args) if command.args.isdigit() else 0
     user_data = get_user_data(target_id)
     
-    db_username = "Не найден"
-    plan_info = "Отсутствует"
-    expiry_text = "-"
-    
-    if user_data:
-        db_username = f"@{user_data[2]}" if user_data[2] else "Не установлен"
-        plan_info = user_data[3] if user_data[3] != 'none' else "Нет"
-        now = int(time.time())
-        if user_data[0] > now:
-            if (user_data[0] - now) > (10 * 365 * 24 * 60 * 60):
-                expiry_text = "Бессрочно ∞"
-            else:
-                expiry_text = time.strftime('%d.%m.%Y', time.localtime(user_data[0]))
-        else:
-            expiry_text = "Истекла"
+    if not user_data: return await message.answer("❌ Пользователь не найден в БД.")
 
-    try:
-        chat = await bot.get_chat(target_id)
-        current_username = f"@{chat.username}" if chat.username else "Скрыт/Нет"
-    except:
-        current_username = db_username
-
-    text = (
-        f"🔍 <b>Информация о пользователе:</b>\n\n"
-        f"🆔 ID: <code>{target_id}</code>\n"
-        f"👤 Юзернейм (сейчас): {current_username}\n"
-        f"📖 Юзернейм (в БД): {db_username}\n"
-        f"💎 Тариф: <b>{plan_info}</b>\n"
-        f"📅 Срок до: <b>{expiry_text}</b>"
+    db_username = f"@{user_data[2]}" if user_data[2] else "Не установлен"
+    plan_info = user_data[3] if user_data[3] != 'none' else "Нет"
+    now = int(time.time())
+    expiry_text = "Истекла" if user_data[0] <= now else (
+        "Бессрочно ∞" if (user_data[0] - now) > (10 * 365 * 24 * 60 * 60) 
+        else time.strftime('%d.%m.%Y', time.localtime(user_data[0]))
     )
+
+    text = (f"🔍 <b>Информация:</b>\n\n🆔 ID: <code>{target_id}</code>\n👤 Юзер: {db_username}\n💎 Тариф: <b>{plan_info}</b>\n📅 До: <b>{expiry_text}</b>")
     await message.answer(text, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("adm_ap_"))
 async def adm_ap(callback: CallbackQuery):
     d = callback.data.split("_")
-    uid = int(d[2])
-    months = d[-1]
+    uid, months = int(d[2]), d[-1]
     t_type = "_".join(d[3:-1])
     
     user_info = get_user_data(uid)
-    username = user_info[2] if user_info else None
-    
     plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
     p_full_name = f"{plan_names[t_type]} ({months} мес.)"
     
     expiry_ts = await activate_user_in_db(uid, plan=p_full_name, months=months)
-    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, username, expiry_ts, p_full_name)
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, uid, user_info[2] if user_info else None, expiry_ts, p_full_name)
     
-    try: await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nТариф: <b>{p_full_name}</b>\n🔗 <b>Ваш ключ для HAPP:</b>\n{hcode(lnk)}", parse_mode="HTML")
+    try: await bot.send_message(uid, f"✅ <b>Оплата принята!</b>\n\nТариф: <b>{p_full_name}</b>\n🔗 <b>Ваш ключ:</b>\n{hcode(lnk)}", parse_mode="HTML")
     except: pass
-    await callback.message.edit_text(f"✅ Выдано для {uid} ({p_full_name})")
+    await callback.message.edit_text(f"✅ Выдано для {uid}")
 
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     user_id = callback.from_user.id
     d = get_user_data(user_id)
-    if d is None: return await callback.answer("Нажмите /start", show_alert=True)
+    if not d: return await callback.answer("Нажмите /start", show_alert=True)
     
     now = int(time.time())
     panel_client = await asyncio.get_event_loop().run_in_executor(None, check_client_in_panel, user_id)
     
     if (d[1] == 0 or d[0] < now) and not panel_client:
-        return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
+        return await callback.message.edit_text("👤 <b>Личный кабинет</b>\n\nПодписка: ❌ Не активна.", 
+                                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
     
     await callback.answer("🔄 Загрузка...")
     expiry_date = d[0] if d[0] > now else (panel_client['expiryTime'] // 1000 if panel_client else now)
-    plan_name = d[3] if d[3] != 'none' else "Активен"
+    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, d[2], expiry_date, d[3])
     
-    lnk = await asyncio.get_event_loop().run_in_executor(None, get_vpn_link, user_id, d[2], expiry_date, plan_name)
     expiry_text = "Бессрочно ∞" if (expiry_date - now) > (10 * 365 * 24 * 60 * 60) else time.strftime('%d.%m.%Y', time.localtime(expiry_date))
-    
-    text = f"👤 <b>Личный кабинет</b>\nТариф: {plan_name}\nДо: {expiry_text}\n\n🔗 <b>Ваша ссылка (HAPP):</b>\n{hcode(lnk)}"
+    text = f"👤 <b>Личный кабинет</b>\nТариф: {d[3]}\nДо: {expiry_text}\n\n🔗 <b>Ключ:</b>\n{hcode(lnk)}"
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.message(CommandStart())
@@ -277,89 +291,90 @@ async def to_main(callback: CallbackQuery):
 
 @router.callback_query(F.data == "tariffs")
 async def show_tariffs(callback: CallbackQuery):
-    text = "💎 <b>Выберите тип тарифа:</b>\n\nВсе тарифы обеспечивают высокую скорость и обход блокировок."
-    btns = [
-        [InlineKeyboardButton(text="🔹 Стандарт (от 70₽)", callback_data="type_standart")],
-        [InlineKeyboardButton(text="⭐ Стандарт + (от 105₽)", callback_data="type_standart_plus")],
-        [InlineKeyboardButton(text="👑 Премиум (от 210₽)", callback_data="type_premium")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
-    ]
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    btns = [[InlineKeyboardButton(text="🔹 Стандарт", callback_data="type_standart")],
+            [InlineKeyboardButton(text="⭐ Стандарт +", callback_data="type_standart_plus")],
+            [InlineKeyboardButton(text="👑 Премиум", callback_data="type_premium")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]
+    await callback.message.edit_text("💎 <b>Выберите тариф:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("type_"))
 async def choose_duration(callback: CallbackQuery):
     t_type = callback.data.replace("type_", "")
     data = {
-        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "m": [100, 90, 80, 70], "desc": "— Трафик: <b>50 ГБ</b>\n— Устройств: <b>1</b>\n— Локация: DE"},
-        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "m": [150, 135, 120, 105], "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>1</b>\n— Локация: DE"},
-        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "m": [300, 270, 240, 210], "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>до 3-х</b>\n— Приоритетная поддержка"}
+        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "desc": "50 ГБ, 1 устройство"},
+        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "desc": "БЕЗЛИМИТ, 1 устройство"},
+        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "desc": "БЕЗЛИМИТ, 3 устройства"}
     }
     info = data[t_type]
-    text = f"💳 <b>Тариф: {info['name']}</b>\n\n{info['desc']}\n\n—————\n⏳ <b>Выберите срок подписки:</b>\n<i>Чем дольше срок, тем больше выгода!</i>\n\n🤝 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи тариф <b>БЕСПЛАТНО НАВСЕГДА!</b>"
     btns = [[InlineKeyboardButton(text=f"{m} мес. — {info['p'][idx]}₽", callback_data=f"buy_{t_type}_{m}")] for idx, m in enumerate([1,3,6,12])]
     btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    await callback.message.edit_text(f"💳 <b>{info['name']}</b>\n{info['desc']}", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
     parts = callback.data.split("_")
-    t_type, months = ("_".join(parts[1:-1]), parts[-1])
-    plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
-    plan_display = f"{plan_names[t_type]} ({months} мес.)"
+    t_type, months = "_".join(parts[1:-1]), parts[-1]
     url = LINKS[t_type][months]
     m = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {plan_display}", url=url)],
+        [InlineKeyboardButton(text="💳 Оплатить", url=url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"paid_{callback.from_user.id}_{t_type}_{months}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"type_{t_type}")]
     ])
-    await callback.message.edit_text(f"Вы выбрали <b>{plan_display}</b>.\n\nПосле оплаты нажмите кнопку проверки. Ключ нужно будет вставить в <b>HAPP</b>.", reply_markup=m, parse_mode="HTML")
+    await callback.message.edit_text(f"Оплатите тариф и нажмите кнопку проверки.", reply_markup=m, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("paid_"))
 async def user_paid(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Лимит: 3 раза в час
+    wait_time = check_payment_limit(user_id)
+    if wait_time > 0:
+        return await callback.answer(f"⚠️ Подождите {wait_time // 60} мин. до следующей попытки.", show_alert=True)
+
     d = callback.data.split("_")
     uid, months, t_type = d[1], d[-1], "_".join(d[2:-1])
-    plan_names = {"standart": "Стандарт", "standart_plus": "Стандарт +", "premium": "Премиум"}
-    p_name = f"{plan_names[t_type]} ({months} мес.)"
+    p_name = f"{t_type} ({months} мес.)"
+    
     m = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"adm_ap_{uid}_{t_type}_{months}")],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_dec_{uid}")]
+        [InlineKeyboardButton(text="✅ Ок", callback_data=f"adm_ap_{uid}_{t_type}_{months}")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data=f"adm_dec_{uid}")]
     ])
+    
     for a in ADMINS:
         if a != 0:
-            try: await bot.send_message(a, f"💰 Заявка: <b>{p_name}</b> от @{callback.from_user.username}", reply_markup=m, parse_mode="HTML")
+            try: await bot.send_message(a, f"💰 Заявка от @{callback.from_user.username} на {p_name}", reply_markup=m)
             except: pass
-    await callback.answer("⏳ Заявка отправлена. Ожидайте подтверждения.", show_alert=True)
+    await callback.answer("⏳ Заявка отправлена!", show_alert=True)
 
 @router.callback_query(F.data == "about_menu")
 async def about_menu(callback: CallbackQuery):
-    text = "📖 <b>О сервисе TrubaVPN</b>\n\nОфициальные документы доступны по ссылкам ниже:"
-    btns = [
-        [InlineKeyboardButton(text="📜 Пользовательское соглашение", url="https://telegra.ph/Soglashenie-ob-ispolzovanii-materialov-i-servisov-internet-sajta-04-27")],
-        [InlineKeyboardButton(text="🛡 Политика конфиденциальности", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-servisa-TrubaVPN-04-27")],
-        [InlineKeyboardButton(text="🆘 Поддержка", url=f"https://t.me/{SUPPORT_CONTACT.replace('@','')}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]
-    ]
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    btns = [[InlineKeyboardButton(text="📜 Соглашение", url="https://telegra.ph/Soglashenie-ob-ispolzovanii-materialov-i-servisov-internet-sajta-04-27")],
+            [InlineKeyboardButton(text="🛡 Политика", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-servisa-TrubaVPN-04-27")],
+            [InlineKeyboardButton(text="🆘 Поддержка", url=f"https://t.me/{SUPPORT_CONTACT.replace('@','')}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]
+    await callback.message.edit_text("📖 <b>Информация:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data == "ref_program")
 async def show_ref(callback: CallbackQuery):
     d = get_user_data(callback.from_user.id)
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    text = f"🤝 <b>Реферальная программа</b>\n\nПригласи 5 друзей и получи <b>ВЕЧНЫЙ ПРЕМИУМ</b>!\n\n👥 Приглашено: {d[5] if d else 0} / 5\n🔗 Ссылка:\n{hcode(link)}"
+    text = f"🤝 <b>Рефералы: {d[5] if d else 0} / 5</b>\n\nСсылка:\n{hcode(link)}"
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("adm_dec_"))
 async def adm_dec(callback: CallbackQuery):
     uid = int(callback.data.split("_")[2])
-    try: await bot.send_message(uid, "❌ Администратор не подтвердил ваш платеж.")
+    try: await bot.send_message(uid, "❌ Платеж не подтвержден.")
     except: pass
-    await callback.message.edit_text(f"❌ Отклонено для {uid}")
+    await callback.message.edit_text(f"❌ Отклонено: {uid}")
 
 async def main():
     init_db()
+    # Регистрируем Middleware для проверки подписки
+    router.message.middleware(JoinCheckMiddleware())
+    router.callback_query.middleware(JoinCheckMiddleware())
     dp.include_router(router)
-    # asyncio.create_task(check_expiry_notifications()) # Раскомментируй, если функция определена
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
