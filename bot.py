@@ -84,7 +84,6 @@ def check_payment_limit(user_id):
     if user_id not in payment_attempts:
         payment_attempts[user_id] = []
     
-    # Удаляем записи старше 1 часа
     payment_attempts[user_id] = [t for t in payment_attempts[user_id] if now - t < 3600]
     
     if len(payment_attempts[user_id]) >= 3:
@@ -295,20 +294,30 @@ async def show_tariffs(callback: CallbackQuery):
             [InlineKeyboardButton(text="⭐ Стандарт +", callback_data="type_standart_plus")],
             [InlineKeyboardButton(text="👑 Премиум", callback_data="type_premium")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]
-    await callback.message.edit_text("💎 <b>Выберите тариф:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    
+    caption = (
+        "💎 <b>Выберите подходящий тариф:</b>\n\n"
+        "🔹 <b>Стандарт:</b> 50 ГБ трафика, 1 устройство.\n"
+        "⭐ <b>Стандарт +:</b> ПОЛНЫЙ БЕЗЛИМИТ, 1 устройство.\n"
+        "👑 <b>Премиум:</b> ПОЛНЫЙ БЕЗЛИМИТ, до 3-х устройств одновременно."
+    )
+    
+    await callback.message.edit_text(caption, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("type_"))
 async def choose_duration(callback: CallbackQuery):
     t_type = callback.data.replace("type_", "")
     data = {
-        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "desc": "50 ГБ, 1 устройство"},
-        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "desc": "БЕЗЛИМИТ, 1 устройство"},
-        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "desc": "БЕЗЛИМИТ, 3 устройства"}
+        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "desc": "📊 Лимит: 50 ГБ\n📱 Устройств: 1"},
+        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "desc": "🚀 Лимит: БЕЗЛИМИТ\n📱 Устройств: 1"},
+        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "desc": "👑 Лимит: БЕЗЛИМИТ\n📱 Устройств: 3"}
     }
     info = data[t_type]
     btns = [[InlineKeyboardButton(text=f"{m} мес. — {info['p'][idx]}₽", callback_data=f"buy_{t_type}_{m}")] for idx, m in enumerate([1,3,6,12])]
     btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")])
-    await callback.message.edit_text(f"💳 <b>{info['name']}</b>\n{info['desc']}", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+    
+    text = f"💳 <b>Тариф: {info['name']}</b>\n\n{info['desc']}\n\nВыберите период подписки:"
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: CallbackQuery):
@@ -326,7 +335,6 @@ async def process_buy(callback: CallbackQuery):
 async def user_paid(callback: CallbackQuery):
     user_id = callback.from_user.id
     
-    # Лимит: 3 раза в час
     wait_time = check_payment_limit(user_id)
     if wait_time > 0:
         return await callback.answer(f"⚠️ Подождите {wait_time // 60} мин. до следующей попытки.", show_alert=True)
@@ -371,7 +379,6 @@ async def adm_dec(callback: CallbackQuery):
 
 async def main():
     init_db()
-    # Регистрируем Middleware для проверки подписки
     router.message.middleware(JoinCheckMiddleware())
     router.callback_query.middleware(JoinCheckMiddleware())
     dp.include_router(router)
