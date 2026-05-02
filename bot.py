@@ -364,7 +364,7 @@ async def show_ref(callback: CallbackQuery):
     d = get_user_data(callback.from_user.id)
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    text = f"🤝 <b>Реферальная программа</b>\n\nПригласи 5 друзей и получи <b>ВЕЧНЫЙ ПРЕМИУМ</b>!\n\n👥 Приглашено: {d[5] if d else 0} / 5\n🔗 Ссылка:\n{hcode(link)}"
+    text = f"🤝 <b>Реферальная программа</b>\n\nПригласи 5 друзей, которые оплатят подписку(Любой тариф) и получи <b>ВЕЧНЫЙ ПРЕМИУМ</b>!\n\n👥 Приглашено: {d[5] if d else 0} / 5\n🔗 Ссылка:\n{hcode(link)}"
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("adm_dec_"))
