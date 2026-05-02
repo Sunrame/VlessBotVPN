@@ -42,7 +42,7 @@ LOGIN = os.getenv('PANEL_LOGIN')
 PASSWORD = os.getenv('PANEL_PASSWORD')
 INBOUND_ID = 1 
 
-SUPPORT_CONTACT = "@RSConnectHelp_bot"
+SUPPORT_CONTACT = "@vvvvvpppnn"
 CHANNEL_ID = "@Truba_VPN" # Твой канал
 
 logging.basicConfig(level=logging.INFO)
@@ -348,8 +348,8 @@ async def user_paid(callback: CallbackQuery):
 
 @router.callback_query(F.data == "about_menu")
 async def about_menu(callback: CallbackQuery):
-    btns = [[InlineKeyboardButton(text="📜 Соглашение", url="https://telegra.ph/Soglashenie-ob-ispolzovanii-materialov-i-servisov-internet-sajta-04-27")],
-            [InlineKeyboardButton(text="🛡 Политика", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-servisa-TrubaVPN-04-27")],
+    btns = [[InlineKeyboardButton(text="📜 Пользовательское Соглашение", url="https://telegra.ph/Soglashenie-ob-ispolzovanii-materialov-i-servisov-internet-sajta-04-27")],
+            [InlineKeyboardButton(text="🛡 Политика Конфиденциальности ", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-servisa-TrubaVPN-04-27")],
             [InlineKeyboardButton(text="🆘 Поддержка", url=f"https://t.me/{SUPPORT_CONTACT.replace('@','')}")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="to_main")]]
     await callback.message.edit_text("📖 <b>Информация:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
