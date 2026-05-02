@@ -229,14 +229,45 @@ async def show_tariffs(callback: CallbackQuery):
 async def choose_duration(callback: CallbackQuery):
     t_type = callback.data.replace("type_", "")
     data = {
-        "standart": {"name": "Стандарт", "p": [100, 270, 480, 840], "m": [100, 90, 80, 70], "desc": "— Трафик: <b>50 ГБ</b>\n— Устройств: <b>1</b>\n— Локации: NL, DE"},
-        "standart_plus": {"name": "Стандарт +", "p": [150, 405, 720, 1260], "m": [150, 135, 120, 105], "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>1</b>\n— Локации: NL, DE, KZ"},
-        "premium": {"name": "Премиум", "p": [300, 810, 1440, 2520], "m": [300, 270, 240, 210], "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>до 3-х</b>\n— Приоритетная поддержка"}
+        "standart": {
+            "name": "Стандарт", 
+            "p": [100, 270, 480, 840], 
+            "desc": "— Трафик: <b>50 ГБ</b>\n— Устройств: <b>1</b>\n— Локация: DE"
+        },
+        "standart_plus": {
+            "name": "Стандарт +", 
+            "p": [150, 405, 720, 1260], 
+            "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>1</b>\n— Локация: DE"
+        },
+        "premium": {
+            "name": "Премиум", 
+            "p": [300, 810, 1440, 2520], 
+            "desc": "— Трафик: <b>БЕЗЛИМИТ</b>\n— Устройств: <b>до 3-х</b>\n— Приоритетная поддержка"
+        }
     }
     info = data[t_type]
-    text = f"💳 <b>Тариф: {info['name']}</b>\n\n{info['desc']}\n\n—————\n⏳ <b>Выберите срок подписки:</b>\n<i>Чем дольше срок, тем больше выгода!</i>\n\n🤝 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи тариф <b>БЕСПЛАТНО НАВСЕГДА!</b>"
-    btns = [[InlineKeyboardButton(text=f"{m} мес. — {info['p'][idx]}₽", callback_data=f"buy_{t_type}_{m}")] for idx, m in enumerate([1,3,6,12])]
+    months_list = [1, 3, 6, 12]
+    
+    text = (
+        f"💳 <b>Тариф: {info['name']}</b>\n\n"
+        f"{info['desc']}\n\n"
+        f"—————\n"
+        f"⏳ <b>Выберите срок подписки:</b>\n"
+        f"<i>Чем дольше срок, тем больше выгода!</i>\n\n"
+        f"🤝 <b>АКЦИЯ:</b> Пригласи 5 друзей и получи тариф <b>БЕСПЛАТНО НАВСЕГДА!</b>"
+    )
+    
+    btns = []
+    for idx, m in enumerate(months_list):
+        total_price = info['p'][idx]
+        price_per_month = total_price // m  # Расчет стоимости в месяц
+        
+        # Формируем текст кнопки: Срок — Общая цена (Цена в месяц/мес)
+        btn_text = f"{m} мес. — {total_price}₽ ({price_per_month}₽/мес)"
+        btns.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy_{t_type}_{m}")])
+    
     btns.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="tariffs")])
+    
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("buy_"))
