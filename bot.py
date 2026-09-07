@@ -1210,16 +1210,37 @@ def _squad_uuids(raw_squads) -> list[str]:
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
+def _remna_user_id(user):
+    """Числовой id пользователя — то, чем его называет нынешняя панель.
+
+    Панель перешла с UUID на целочисленный id: поля `uuid` в объекте
+    пользователя больше нет, вместо него `id` (число), а VLESS-ключ уехал
+    в отдельное `vlessUuid`. Именно это число понимает PATCH /api/users
+    в поле `id`.
+    """
+    if not isinstance(user, dict):
+        return user if isinstance(user, int) else None
+    val = user.get("id")
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str) and val.isdigit():
+        return int(val)
+    return None
+
 def _remna_uuid(user) -> str | None:
-    """UUID пользователя панели, под каким бы именем он ни лежал.
+    """UUID пользователя панели — только для старых версий Remnawave.
 
     Раньше везде стояло обращение remna["uuid"] по ключу. Когда панель
     перестала отдавать это поле под таким именем, всё, что ПИШЕТ в панель,
     начало падать с KeyError: выдача, продление, смена лимита устройств.
     Читалка при этом продолжала работать — поэтому /check людей находил,
-    а изменить их было нельзя. Теперь ключ ищется по нескольким именам,
-    а если не нашёлся — возвращаем None, и вызывающий код скажет об этом
-    внятно, вместо падения.
+    а изменить их было нельзя.
+
+    На нынешней панели UUID пользователя не существует вовсе, и эта функция
+    честно вернёт None — идентификатором служит _remna_user_id. Оставлена
+    ради совместимости, если панель откатят к старой версии.
     """
     if not isinstance(user, dict):
         return None
@@ -1228,17 +1249,27 @@ def _remna_uuid(user) -> str | None:
         if isinstance(val, str) and _UUID_RE.match(val):
             return val
     # Последний шанс: любое поле с «uuid»/«id» в имени, похожее на UUID.
-    # Служебные ссылки (сквад, нода, подписка) исключаем, чтобы не
-    # отправить в панель чужой идентификатор.
+    # Исключаем служебные ссылки (сквад, нода, подписка) и персональные
+    # ключи протоколов (vlessUuid, trojanPassword, ssPassword): это НЕ
+    # идентификатор пользователя, и отправлять их в панель нельзя.
     for key, val in user.items():
         low = key.lower()
         if not isinstance(val, str) or not _UUID_RE.match(val):
             continue
-        if any(bad in low for bad in ("squad", "node", "host", "config", "profile", "sub")):
+        if any(bad in low for bad in ("squad", "node", "host", "config", "profile",
+                                      "sub", "vless", "trojan", "shadowsocks", "ss")):
             continue
         if "uuid" in low or low.endswith("id"):
             return val
     return None
+
+def _remna_ref_str(user) -> str | None:
+    """Идентификатор пользователя панели строкой — колонка remna_uuid в БД
+    имеет тип TEXT, а id у новой панели числовой."""
+    ref = _remna_user_id(user)
+    if ref is None:
+        ref = _remna_uuid(user)
+    return str(ref) if ref is not None else None
 
 def _expire_at(days: int) -> str:
     dt = datetime.now(timezone.utc) + timedelta(days=days)
@@ -1319,7 +1350,12 @@ async def remna_extend_user(user_id: int, days: int, hwid: int | None = None,
         return await remna_create_user(user_id, days, hwid or 1, squad_uuid or SQUAD_UUID_BASIC)
 
     now        = datetime.now(timezone.utc)
-    current    = datetime.fromisoformat(user["expireAt"].replace("Z", "+00:00"))
+    # Дату окончания панель может не отдать — тогда считаем от «сейчас»,
+    # а не падаем с KeyError посреди выдачи подписки.
+    raw_expire = str(user.get("expireAt") or "")
+    current    = datetime.fromisoformat(raw_expire.replace("Z", "+00:00")) if raw_expire else now
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     base       = max(current, now)
     new_expire = (base + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -1343,21 +1379,26 @@ async def remna_extend_user(user_id: int, days: int, hwid: int | None = None,
 _REMNA_IDENT_KEY: str | None = None
 _REMNA_IDENT_ORDER = ("username", "id", "uuid")
 
-def _remna_ident_candidates(ref) -> list[tuple[str, str]]:
+def _remna_ident_candidates(ref) -> list[tuple[str, object]]:
     """Чем можно назвать пользователя в теле запроса, в порядке приоритета.
-    ref — либо объект пользователя из панели, либо готовый uuid-строкой."""
+    ref — объект пользователя из панели, либо числовой id, либо uuid-строка."""
     if isinstance(ref, dict):
         username = ref.get("username")
+        num_id   = _remna_user_id(ref)
         uuid_    = _remna_uuid(ref)
     else:
         username = None
-        uuid_    = ref if isinstance(ref, str) else None
+        num_id   = _remna_user_id(ref)
+        uuid_    = ref if isinstance(ref, str) and _UUID_RE.match(ref) else None
 
-    by_key: dict[str, str] = {}
+    by_key: dict[str, object] = {}
     if username:
         by_key["username"] = username
+    # id и uuid — разные вещи: id числовой у новой панели, uuid строковый
+    # у старой. Смешивать их нельзя, иначе в панель уйдёт чужой ключ.
+    if num_id is not None:
+        by_key["id"] = num_id
     if uuid_:
-        by_key["id"]   = uuid_
         by_key["uuid"] = uuid_
 
     order = list(_REMNA_IDENT_ORDER)
@@ -1518,7 +1559,7 @@ async def remna_get_all_users() -> list:
 
                 added = 0
                 for u in users:
-                    key = _remna_uuid(u) or u.get("username")
+                    key = _remna_user_id(u) or _remna_uuid(u) or u.get("username")
                     if key is not None:
                         if key in seen:
                             continue
@@ -1566,12 +1607,21 @@ async def remna_get_all_users() -> list:
                  len(best), best_total)
     return best
 
-async def remna_get_user_hwid(uuid_: str) -> list:
-    """Список HWID-устройств пользователя: GET /api/users/{uuid}/hwid"""
+async def remna_get_user_hwid(ref) -> list:
+    """Список HWID-устройств пользователя: GET /api/hwid/devices/{id}
+
+    Прежний маршрут /api/users/{uuid}/hwid панель больше не отдаёт (404),
+    а идентификатором служит числовой id. ref — объект пользователя из
+    панели либо готовый id.
+    """
+    user_id = _remna_user_id(ref)
+    if user_id is None:
+        log.error("[Remna] get_user_hwid: не удалось определить id пользователя")
+        return []
     try:
         async with httpx.AsyncClient(verify=True) as client:
             r = await client.get(
-                f"{REMNAWAVE_URL}/api/users/{uuid_}/hwid",
+                f"{REMNAWAVE_URL}/api/hwid/devices/{user_id}",
                 headers=_remna_headers(), timeout=15,
             )
             if r.status_code == 404:
@@ -1650,7 +1700,7 @@ async def activate_subscription(user_id: int, days: int, hwid: int = 1,
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE users SET remna_uuid=$1 WHERE user_id=$2",
-                _remna_uuid(result), user_id,
+                _remna_ref_str(result), user_id,
             )
             if whitelist_gb > 0:
                 await conn.execute(
@@ -3251,13 +3301,16 @@ async def _build_profile_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     flow: list[InlineKeyboardButton] = []
     cabinet_row    = _cabinet_button_row()
     user_is_admin  = is_admin(user_id)
-    admin_site_url = "https://accept-finances-cyber-itself.trycloudflare.com/"
+    # Адрес админ-сайта берём из SITE_URL: сайт отдаётся через quick-туннель
+    # cloudflared, домен которого меняется при каждом перезапуске, поэтому
+    # зашивать его в код нельзя — ссылка протухает.
+    admin_site_url = f"{SITE_URL}/" if SITE_URL else ""
 
     def _place_cabinet():
         # Кнопка «Личный кабинет», а для админов — следом ссылка на админ-сайт,
         # они и встанут в одну пару.
         flow.extend(cabinet_row)
-        if user_is_admin:
+        if user_is_admin and admin_site_url:
             flow.append(btn("Админ-сайт", emoji_id=BTN_ICON_ADMIN, url=admin_site_url))
 
     # Кнопка «Пробная подписка» показывается только если:
@@ -4214,7 +4267,7 @@ async def _fulfill_purchase(*, pay_id: str, u_id: int, kind: str, days: int = 0,
             else:
                 await conn.execute(
                     "UPDATE users SET plan=$1, extra_devices=0, has_paid=1, remna_uuid=$2 WHERE user_id=$3",
-                    plan_key, _remna_uuid(result_user), u_id,
+                    plan_key, _remna_ref_str(result_user), u_id,
                 )
 
     elif kind == "device":
@@ -5963,7 +6016,7 @@ async def ca_devices_show(cb: CallbackQuery):
     if not remna:
         await cb.message.answer("Пользователь не найден в Remnawave.")
         return
-    devices = await remna_get_user_hwid(_remna_uuid(remna))
+    devices = await remna_get_user_hwid(remna)
     if not devices:
         await cb.message.answer(f"Устройства ID:{user_id}\n\nНет зарегистрированных устройств.")
         return
@@ -7904,7 +7957,7 @@ async def admin_diag(message: types.Message):
     else:
         lines.append("   поля в списке /api/users:")
         lines.append("   " + ", ".join(sorted(sample_list.keys())))
-        lines.append(f"   UUID из списка: {_remna_uuid(sample_list) or 'НЕ НАЙДЕН'}")
+        lines.append(f"   идентификатор из списка: {_remna_ref_str(sample_list) or 'НЕ НАЙДЕН'}")
 
     # Карточка одного человека — именно её использует выдача и редактирование
     probe_id = None
@@ -7917,7 +7970,7 @@ async def admin_diag(message: types.Message):
     if single:
         lines.append("   поля в карточке /api/users/by-username:")
         lines.append("   " + ", ".join(sorted(single.keys())))
-        lines.append(f"   UUID из карточки: {_remna_uuid(single) or 'НЕ НАЙДЕН'}")
+        lines.append(f"   идентификатор из карточки: {_remna_ref_str(single) or 'НЕ НАЙДЕН'}")
     elif probe_id:
         lines.append(f"   карточка by-username НЕ читается (ID:{probe_id})")
         lines.append(f"   {_REMNA_LAST_ERROR or 'без деталей'}")
